@@ -1,0 +1,502 @@
+---
+title: EHR
+author: Duke Liu
+date: "2022/6/18"
+output:
+  prettydoc::html_pretty:
+    theme: Leonids
+    highlight: github
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, eval = T)
+library(tidyverse)
+library(jtools); library(vtable)
+library(corrplot)
+library(ANN2); library(caret);
+showtext::showtext_auto()
+load('ckpt.rda')
+data = data %>%
+  mutate(hb_missing30 = ifelse(is.na(HbA1c_30day), 1, 0),
+         hb_missing90 = ifelse(is.na(HbA1c_90day), 1, 0),
+         weight_missing = ifelse(is.na(bmi), 1, 0), 
+         crea_missing30 = ifelse(is.na(creatinine_30day), 1, 0),
+         crea_missing90 = ifelse(is.na(creatinine_90day), 1, 0))
+
+for(i in 1:length(data$bmi)){
+  if(is.na(data$bmi[i])){
+    data$bmi[i] = sample(1:3, 1)
+  }
+}
+data$bmi = as_factor(data$bmi) # may found dummy of bmi_missing (no corr with y)
+dat = data %>%
+  select(-PERSONID2, -index_date, -creatinine_30day, -creatinine_90day, -HbA1c_30day, -HbA1c_90day, -SMK, -SmokingYear, 
+         -crea_missing90) 
+```
+
+
+## Lasso
+
+在OLS目標函數加入懲罰項，使得影響力太小的變數被shrink到0，達到篩選變數的效果。
+
+`副作用`：估計出的係數會有bias，不過只在意預測的準確度的話，副作用便不成問題。實務上會將lasso挑選出的係數進一步放入OLS或其他glm模型，以便能做統計檢定。
+
+```{r, warning=F, message=F}
+library(biglasso)
+set.seed(1213); index = sample(nrow(data), 0.7*nrow(data))
+train = data[index, ] %>%
+  select(-PERSONID2, -index_date, -hb_missing90); 
+validation = data[-index, ]%>%
+  select(-PERSONID2, -index_date, -hb_missing90)
+y <- train$hb_missing30
+X.bm = as.big.matrix(as.matrix(train %>% select(-hb_missing30)))
+validation_y = validation$hb_missing30
+validation_X = as.big.matrix(as.matrix(validation %>% select(-hb_missing30)))
+fit <- biglasso(X.bm, y)
+
+cvfit <- tryCatch(
+         {
+                cv.biglasso(X.bm, y, seed = 1234, nfolds = 10, ncores = 4)
+         },
+         error = function(cond) {
+                cv.biglasso(X.bm, y, seed = 1234, nfolds = 10, ncores = 2)
+         }
+)
+summary(cvfit)
+coef(cvfit)[which(coef(cvfit) != 0),]
+```
+
+```{r}
+
+validation = tibble(truth = validation_y, 
+       predicted = as.numeric(predict(cvfit, validation_X)))
+validation %>%
+  mutate_at('truth', as.character) %>%
+  ggplot(aes(x=predicted, fill=truth)) + geom_density(alpha=.3)+ # //
+  labs(title = "預測目標為 hb_missing30, 觀察lasso的預測效果。") +
+  theme_bw()
+loss = pROC::auc(validation$truth, validation$predicted)
+threshold= mean(validation$predicted, na.rm = T)
+predicted_values = ifelse(validation$predicted >= threshold, 1, 0)
+conf_matrix<-table(predicted_values,validation$truth)
+cat("AUC：", loss, '\n')
+cat("敏感度：", round(caret::sensitivity(conf_matrix), 2), '\n')
+cat("特異度", round(caret::specificity(conf_matrix), 2), '\n')
+rm(cvfit, fit, train, validation, validation_X, validation_y, X.bm)
+```
+
+### Result
+
+模型預測效果沒有提升，在lambda最佳值為0.0021的前提下，原模型的變數沒有篩選掉很多(27%), 且變數幾乎沒有解釋能力。
+
+## 前30天的Creatinine的遺失機率
+
+放在專題裡面的是HbA1c前30天的模型和結果，這邊一併附上前30天的Creatinine結果。(`不含前90天的預測`)
+
+```{r, warning=F}
+model1 = crea_missing30 ~ .
+first_p_1 = glm(model1, data = dat, family = 'binomial')
+validation = dat %>% 
+  mutate(predicted = predict(first_p_1, dat %>% select(-crea_missing30))) %>%
+  rename(truth = crea_missing30) %>% select(truth, predicted)
+loss = pROC::auc(validation$truth, validation$predicted)
+threshold= mean(validation$predicted)
+predicted_values = ifelse(validation$predicted >= threshold, 1, 0)
+conf_matrix<-table(predicted_values,validation$truth)
+cat("For Reference Model \n", 'AUC: ', loss, '\n Sensitivity: ', 
+    round(caret::sensitivity(conf_matrix), 2), '\n Specificity: ', 
+    round(caret::specificity(conf_matrix), 2), '\n')
+
+first_p_2 <- first_p_1 %>% MASS::stepAIC(trace = FALSE)
+# coef(first_p_2)
+validation = dat %>% 
+  mutate(predicted = predict(first_p_2, dat %>% select(-crea_missing30))) %>%
+  rename(truth = crea_missing30) %>% select(truth, predicted)
+loss = pROC::auc(validation$truth, validation$predicted)
+threshold= mean(validation$predicted)
+predicted_values = ifelse(validation$predicted >= threshold, 1, 0)
+conf_matrix<-table(predicted_values,validation$truth)
+cat("For Stepwise Regression \n", 'AUC: ', loss, '\n Sensitivity: ', 
+    round(caret::sensitivity(conf_matrix), 2), '\n Specificity: ', 
+    round(caret::specificity(conf_matrix), 2), '\n')
+
+model3 = crea_missing30 ~ age + comorbidity + num_specimen + num_dm_drugs + cerebrovascular + `heart(unspecified)` + hyperlipidemia + insomnia + anticoagulant + antihypertensive + antiplatelet  + statin + sex  + hb_missing30 + hb_missing90 
+first_p_3 = glm(model3, data = dat, family = 'binomial')
+validation = dat %>% 
+  mutate(predicted = predict(first_p_3, dat %>% select(-crea_missing30))) %>%
+  rename(truth = crea_missing30) %>% select(truth, predicted)
+loss = pROC::auc(validation$truth, validation$predicted)
+threshold= mean(validation$predicted)
+predicted_values = ifelse(validation$predicted >= threshold, 1, 0)
+conf_matrix<-table(predicted_values,validation$truth)
+cat("In Domain Knowledge Model \n", 'AUC: ', loss, '\n Sensitivity: ', 
+    round(caret::sensitivity(conf_matrix), 2), '\n Specificity: ', 
+    round(caret::specificity(conf_matrix), 2), '\n')
+
+load('best_model.rda')
+validation = dat %>% 
+  bind_cols(data %>% select(crea_missing90)) %>%
+  mutate(predicted = predict(first_p, dat %>% select(-crea_missing30) %>% bind_cols(data %>% select(crea_missing90)))) %>%
+  rename(truth = crea_missing30) %>% select(truth, predicted)
+loss = pROC::auc(validation$truth, validation$predicted)
+threshold= mean(validation$predicted)
+predicted_values = ifelse(validation$predicted >= threshold, 1, 0)
+conf_matrix<-table(predicted_values,validation$truth)
+cat("With Undersampling technique \n", 'AUC: ', loss, '\n Sensitivity: ', 
+    round(caret::sensitivity(conf_matrix), 2), '\n Specificity: ', 
+    round(caret::specificity(conf_matrix), 2), '\n')
+
+jtools::export_summs(first_p,first_p_2,first_p_3, model.names = c("UnderSampling", "Stepwise Reg", "Domain"))
+```
+
+### DNN
+
+```{r, eval = F}
+set.seed(1213)
+index = sample(nrow(dat), 0.7*nrow(dat))
+tt = dat[index, ] %>%
+  mutate(value = 1,
+         bmi = paste0("bmi_", bmi))  %>% 
+  spread(bmi, value,  fill = 0 ) %>%
+  rename(truth = crea_missing30)
+validation = dat[-index, ]%>%
+  mutate(value = 1,
+         bmi = paste0("bmi_", bmi))  %>% 
+  spread(bmi, value,  fill = 0 ) %>%
+  rename(truth = crea_missing30)
+X_train <- tt %>% # shouldn't contain hb_missing30 here!!
+  select(-truth)
+y_train <- tt[, "truth"]
+
+NN <- neuralnetwork(X = X_train, y = y_train, hidden.layers = c(6, 3), optim.type = 'adam', learn.rates = 0.001, activ.functions = 'relu', sgd.momentum = 0.9, L1 = 1, n.epochs = 100, batch.size = 64, val.prop = 0.1)
+validation$predicted <- predict(NN, newdata = (validation %>% select(-truth)))$probabilities[, 'class_1']
+# eva
+loss = pROC::auc(validation$truth, validation$predicted)
+threshold= mean(validation$predicted, na.rm = T)
+predicted_values = ifelse(validation$predicted >= threshold, 1, 0)
+conf_matrix<-table(predicted_values,validation$truth)
+cat('深度學習模型\n', "AUC：", loss, '\n')
+cat("敏感度：", round(caret::sensitivity(conf_matrix), 2), '\n')
+cat("特異度", round(caret::specificity(conf_matrix), 2))
+```
+```{r}
+cat('深度學習模型\n
+ AUC： 0.7482605 \n
+敏感度： 0.69 \n
+特異度 0.66\n')
+```
+
+
+### RF
+
+```{r, message=F}
+set.seed(1213)
+index = sample(nrow(dat), 0.7*nrow(dat))
+tt = dat[index, ] %>%
+  mutate(value = 1,
+         bmi = paste0("bmi_", bmi))  %>% 
+  spread(bmi, value,  fill = 0 ) %>%
+  rename(truth = crea_missing30)
+validation = dat[-index, ]%>%
+  mutate(value = 1,
+         bmi = paste0("bmi_", bmi))  %>% 
+  spread(bmi, value,  fill = 0 ) %>%
+  rename(truth = crea_missing30) %>%
+  mutate(truth = as.factor(truth))
+tt = tt %>% mutate(truth = as.factor(truth))
+names(tt) = c(LETTERS, letters[1:21], 'truth', letters[22:25])
+names(validation) = c(LETTERS, letters[1:21], 'truth', letters[22:25])
+library(randomForest)
+rf = randomForest(truth~., data = tt, mytry = 16, ntree = 500, 
+                  nodesize = 20, importance = T)
+validation$predicted <- predict(rf, validation %>% select(-truth))
+validation = validation %>%
+  select(predicted, truth) %>% mutate_all(as.numeric) %>%
+  mutate(truth = truth - 1, predicted = predicted -1)
+loss = pROC::auc(validation$truth, validation$predicted)
+threshold= mean(validation$predicted, na.rm = T)
+predicted_values = ifelse(validation$predicted >= threshold, 1, 0)
+conf_matrix<-table(predicted_values,validation$truth)
+cat('隨機森林模型\n', "AUC：", loss, '\n')
+cat("敏感度：", round(caret::sensitivity(conf_matrix), 2), '\n')
+cat("特異度", round(caret::specificity(conf_matrix), 2))
+```
+
+## 前30天的Creatinine的填補遺失值
+
+```{r}
+dat = data %>%
+  filter(crea_missing30 == 0) %>%
+  select(-PERSONID2, -index_date, -creatinine_90day, -HbA1c_30day, -HbA1c_90day, -SMK, -SmokingYear, -hb_missing90, -crea_missing90, -crea_missing30) 
+```
+
+
+### DNN
+
+```{r, eval=F}
+set.seed(1213)
+index = sample(nrow(dat), 0.7*nrow(dat))
+tt = dat[index, ] %>%
+  mutate(value = 1,
+         bmi = paste0("bmi_", bmi))  %>% 
+  spread(bmi, value,  fill = 0 ) %>%
+  rename(truth = creatinine_30day)
+validation = dat[-index, ]%>%
+  mutate(value = 1,
+         bmi = paste0("bmi_", bmi))  %>% 
+  spread(bmi, value,  fill = 0 ) %>%
+  rename(truth = creatinine_30day)
+X_train <- tt %>% # shouldn't contain hb_missing30 here!!
+  select(-truth)
+y_train <- tt[, "truth"]
+
+NN <- neuralnetwork(X = X_train, y = y_train, hidden.layers = c(6, 3), optim.type = 'adam', learn.rates = 0.001, activ.functions = 'relu', sgd.momentum = 0.9, L1 = 1, n.epochs = 100, batch.size = 64, val.prop = 0.1)
+validation$predicted <- as.numeric(predict(NN, newdata = (validation %>% select(-truth)))$predictions)
+
+cat("The MSE with DNN as imputation model: ", mean((validation$predicted - validation$truth)^2), 
+    "\n")
+cat("The RMSE with DNN as imputation model: ", 
+    Metrics::rmse(validation$predicted, validation$truth), 
+    '\n')
+```
+
+```{r}
+cat('The MSE with DNN as imputation model:  0.3963488\n 
+The RMSE with DNN as imputation model:  0.6295624 \n')
+dat %>%
+  ggplot(aes(creatinine_30day)) + 
+  geom_histogram( binwidth=0.3, fill="#69b3a2", color="#e9ecef", alpha=0.9) + 
+  theme_bw() + labs(title = 'The distribution of creatinine')
+```
+
+
+### RF
+
+```{r, message=F}
+dat = dat %>% select(-hb_missing30) %>%
+  mutate_at("num_doc", as.double) %>% 
+  mutate_at(c("sex", "chro_180", "chro_0", "weight_missing"), as.factor) %>%
+  filter(is.na(creatinine_30day) == F)
+library(missForest)
+set.seed(1213)
+index <- sample(nrow(dat), 0.7*nrow(dat)) 
+# predicted var: crea_30
+train <- dat[index, ]
+train_X = train %>% select(-creatinine_30day)
+test <- dat[-index, ]
+test_X = test %>% select(-creatinine_30day)
+imp_train_X = train_X
+rf <- randomForest(x = imp_train_X, y = train$creatinine_30day)
+
+train_test_X <- rbind(test_X, imp_train_X)
+# imp_test_X <- missForest(train_test_X)$ximp[1:nrow(test_X), ]
+imp_test_X = train_test_X
+pred_test <- predict(rf, test_X)
+cat("The MSE with RF as imputation model: ", mean((test$creatinine_30day - pred_test)^2), 
+    "\n")
+cat("The RMSE with RF as imputation model: ", 
+    Metrics::rmse(test$creatinine_30day, pred_test), 
+    '\n')
+```
+
+### MissForest
+
+```{r, eval=F}
+train <- dat[index, ]
+train_X <- prodNA(select(train, -creatinine_30day), 0.2)
+  # 是否要對y_30填 20%
+test <- dat[-index, ]
+test_X <- prodNA(select(test, -creatinine_30day), 0.2)
+train_X = as.data.frame(train_X)
+imp_train_X <- missForest(train_X)$ximp
+rf <- randomForest(x = imp_train_X, y = train$creatinine_30day)
+train_test_X <- rbind(test_X, imp_train_X)
+train_test_X = as.data.frame(train_test_X)
+imp_test_X <- missForest(train_test_X)$ximp[1:nrow(test_X), ]
+pred_test <- predict(rf, imp_test_X)
+```
+
+```{r}
+cat("The MSE with MissForest as imputation model: ", 0.3467, 
+    "\n")
+cat("The RMSE with MissForest as imputation model: ", 
+    0.5882, 
+    '\n')
+```
+
+### multiple Imputation
+
+```{r, warning=F, eval=F}
+model1 = creatinine_30day ~ .
+first_p_1 = lm(model1, data = dat)
+validation = dat %>% 
+  mutate(predicted = predict(first_p_1, dat %>% select(-creatinine_30day))) %>%
+  rename(truth = creatinine_30day) %>% select(truth, predicted)
+cat("The MSE with Reference Model: ", mean((validation$truth - validation$predicted)^2), 
+    "\n")
+cat("The RMSE with Reference Model: ", 
+    Metrics::rmse(validation$truth, validation$predicted), 
+    '\n')
+
+first_p_2 <- first_p_1 %>% MASS::stepAIC(trace = FALSE)
+validation = dat %>% 
+  mutate(predicted = predict(first_p_2, dat %>% select(-creatinine_30day))) %>%
+  rename(truth = creatinine_30day) %>% select(truth, predicted)
+cat("The MSE with Stepwise Model: ", mean((validation$truth - validation$predicted)^2), 
+    "\n")
+cat("The RMSE with Stepwise Model: ", 
+    Metrics::rmse(validation$truth, validation$predicted), 
+    '\n')
+
+model3 = creatinine_30day ~ age + comorbidity + num_specimen + num_dm_drugs + cerebrovascular + `heart(unspecified)` + hyperlipidemia + insomnia + anticoagulant + antihypertensive + antiplatelet  + statin + sex  + hb_missing30
+first_p_3 = lm(model3, data = dat)
+validation = dat %>% 
+  mutate(predicted = predict(first_p_3, dat %>% select(-creatinine_30day))) %>%
+  rename(truth = creatinine_30day) %>% select(truth, predicted)
+cat("The MSE with Domain Knowledge: ", mean((validation$truth - validation$predicted)^2), 
+    "\n")
+cat("The RMSE with Domain Knowledge: ", 
+    Metrics::rmse(validation$truth, validation$predicted), 
+    '\n')
+
+Cri = 100
+for(i in 1:5000){index = sample(nrow(dat), 0.5*nrow(dat))
+train = dat[index, ]; validation = dat[-index, ]
+first_p_3 = lm(model3, data = train)
+loss = mean((predict(first_p_3, validation %>% select(-creatinine_30day)) - validation$creatinine_30day)^2)
+if(loss < Cri){
+  Cri = loss
+  best_model = first_p_3
+}}
+validation = dat %>% 
+  mutate(predicted = predict(best_model, dat %>% select(-creatinine_30day))) %>%
+  rename(truth = creatinine_30day) %>% select(truth, predicted)
+cat("The MSE with Validation Set Approach: ", mean((validation$truth - validation$predicted)^2), 
+    "\n")
+cat("The RMSE with Validation Set Approach: ", 
+    Metrics::rmse(validation$truth, validation$predicted), 
+    '\n')
+```
+
+```{r}
+cat('The MSE with Reference Model:  0.2095343 \n
+The RMSE with Reference Model:  0.4577492 \n
+The MSE with Stepwise Model:  0.2106166 \n
+The RMSE with Stepwise Model:  0.4589298 \n
+The MSE with Domain Knowledge:  0.2598865 \n
+The RMSE with Domain Knowledge:  0.5097907 \n
+The MSE with Validation Set Approach:  0.2617286 \n
+The RMSE with Validation Set Approach:  0.5115942 \n')
+```
+
+## 結果
+
+- 在預測Creatinine遺失機率的第一階段，各模型的預測效果有限。
+
+- 填補遺失值的第二階段：**和HbA1c的情況不同**，預測較好的模型是傳統的multiple imputation，反而MissForest和DNN的效果`不如Multiple Imputation`。
+
+```{r, eval=F}
+#result = readxl::read_excel(file.choose()) %>%
+A = result %>%
+  select(1:3) %>%
+  drop_na() %>%
+  rename(Model = `Model...1`, type = `type...2`) %>%
+  ggplot(aes(Model, AUC, fill = type)) +
+  geom_bar(stat = 'identity', position = 'dodge') + 
+  theme_bw() +
+  scale_fill_brewer(palette = 17)
+
+B = result %>%
+  select(1:2, 4) %>%
+  drop_na() %>%
+  rename(Model = `Model...1`, type = `type...2`) %>%
+  ggplot(aes(Model, Sensitivity, fill = type)) +
+  geom_bar(stat = 'identity', position = 'dodge') + 
+  theme_bw() +
+  scale_fill_brewer(palette = 16)
+
+C= result %>%
+  select(1:2, 5) %>%
+  drop_na() %>%
+  rename(Model = `Model...1`, type = `type...2`) %>%
+  ggplot(aes(Model, Specificity, fill = type)) +
+  geom_bar(stat = 'identity', position = 'dodge') + 
+  theme_bw() +
+  scale_fill_brewer(palette = 16)
+
+D = result %>%
+  select(7:9) %>%
+  drop_na() %>%
+  rename(Model = `Model...7`, type = `type...8`) %>%
+  ggplot(aes(Model, MSE, fill = type)) +
+  geom_bar(stat = 'identity', position = 'dodge') + 
+  theme_bw() +
+  scale_fill_brewer(palette = 1)
+
+E = result %>%
+  select(7:8, 10) %>%
+  drop_na() %>%
+  rename(Model = `Model...7`, type = `type...8`) %>%
+  ggplot(aes(Model, rMSE, fill = type)) +
+  geom_bar(stat = 'identity', position = 'dodge') + 
+  theme_bw() +
+  scale_fill_brewer(palette = 2)
+
+library(cowplot)
+F_ = cowplot::plot_grid(A, B, C, ncol = 3)
+G = cowplot::plot_grid(D, E, ncol = 2)
+p1 = cowplot::plot_grid(F_, G, ncol = 1)
+
+
+
+```
+
+
+```{r, eval=F}
+data = data%>%
+  select(hb_missing30, crea_missing30, HbA1c_30day, creatinine_30day)
+library(corrplot)
+A = cor(data %>% select(1:2))
+corrplot(A, type = 'full')
+A = cor(data %>% select(3:4) %>% drop_na())
+corrplot(A, type = 'full')
+
+```
+
+
+```{r, eval=F}
+majority = data %>%
+  filter(crea_missing30 == 0) %>%
+  select(age, comorbidity , num_specimen , num_dm_drugs , cerebrovascular , `heart(unspecified)` , hyperlipidemia , insomnia , anticoagulant , antihypertensive , antiplatelet  , statin, sex, hb_missing30, hb_missing90, crea_missing90, crea_missing30)
+tt = data %>%
+  filter(crea_missing30 == 1) %>%
+    select(age, comorbidity , num_specimen , num_dm_drugs , cerebrovascular , `heart(unspecified)` , hyperlipidemia , insomnia , anticoagulant , antihypertensive , antiplatelet  , statin, sex, hb_missing30, hb_missing90, crea_missing90, crea_missing30)
+Loss = 0.7 # 最好0.7以上
+
+for(i in 1:5000){
+df = majority[sample(3462, 2500, replace = F), ] %>%
+  bind_rows(tt[sample(3558, 2500, replace = F), ])
+index = sample(nrow(df), 0.7*nrow(df))
+train = df[index, ]
+validation = df[-index, ]
+model = crea_missing30 ~ age + comorbidity + num_specimen + num_dm_drugs + cerebrovascular + `heart(unspecified)` + hyperlipidemia + insomnia + anticoagulant + antihypertensive + antiplatelet  + statin + sex + hb_missing30 + hb_missing90 + crea_missing90
+first_p = glm(model, data = train, family = 'binomial')
+validation = validation %>% 
+  mutate(predicted = predict(first_p, validation %>% select(-crea_missing30))) %>%
+  rename(truth = crea_missing30)
+# loss = MLmetrics::LogLoss(validation$predicted, validation$truth)
+loss = pROC::auc(validation$truth, validation$predicted)
+if(loss > (Loss+1e-4)){
+  save(first_p, file = 'best_model.rda')
+  Loss = loss
+  cat("The AUC for local minima is ", loss, "\nModel saved successful! ", "\n")
+}
+}
+loss
+```
+
+
+

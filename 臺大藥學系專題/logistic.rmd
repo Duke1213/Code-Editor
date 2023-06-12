@@ -1,0 +1,775 @@
+---
+title: EHR
+author: Duke Liu
+date: "2021/9/26"
+output:
+  prettydoc::html_pretty:
+    theme: Leonids
+    highlight: github
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, eval = F)
+library(tidyverse)
+library(jtools); library(vtable)
+library(corrplot)
+library(ANN2); library(caret);
+showtext::showtext_auto()
+load('ckpt.rda')
+data = data %>%
+  mutate(hb_missing30 = ifelse(is.na(HbA1c_30day), 1, 0),
+         hb_missing90 = ifelse(is.na(HbA1c_90day), 1, 0),
+         weight_missing = ifelse(is.na(bmi), 1, 0), 
+         crea_missing30 = ifelse(is.na(creatinine_30day), 1, 0),
+         crea_missing90 = ifelse(is.na(creatinine_90day), 1, 0))
+
+for(i in 1:length(data$bmi)){
+  if(is.na(data$bmi[i])){
+    data$bmi[i] = sample(1:3, 1)
+  }
+}
+data$bmi = as_factor(data$bmi) # may found dummy of bmi_missing (no corr with y)
+dat = data %>%
+  select(-PERSONID2, -index_date, -creatinine_30day, -creatinine_90day, -HbA1c_30day, -HbA1c_90day, -SMK, -SmokingYear) 
+```
+
+## 2022 03 30 用到的模型
+```{r}
+# stargazer/ jtools/ vtable
+## 1. 全放baseline
+model1 = hb_missing30 ~ .
+first_p_1 = glm(model1, data = dat, family = 'binomial')
+validation = dat %>% 
+  mutate(predicted = predict(first_p_1, dat %>% select(-hb_missing30))) %>%
+  rename(truth = hb_missing30) %>% select(truth, predicted)
+loss = pROC::auc(validation$truth, validation$predicted)
+threshold= mean(validation$predicted)
+predicted_values = ifelse(validation$predicted >= threshold, 1, 0)
+conf_matrix<-table(predicted_values,validation$truth)
+round(caret::sensitivity(conf_matrix), 2)
+round(caret::specificity(conf_matrix), 2)
+# regclass::VIF(first_p_1) # 膨脹係數
+
+## 2. stepwise
+first_p_2 <- first_p_1 %>% MASS::stepAIC(trace = FALSE)
+coef(first_p_2)
+validation = dat %>% 
+  mutate(predicted = predict(first_p_2, dat %>% select(-hb_missing30))) %>%
+  rename(truth = hb_missing30) %>% select(truth, predicted)
+loss = pROC::auc(validation$truth, validation$predicted)
+threshold= mean(validation$predicted)
+predicted_values = ifelse(validation$predicted >= threshold, 1, 0)
+conf_matrix<-table(predicted_values,validation$truth)
+round(caret::sensitivity(conf_matrix), 2)
+round(caret::specificity(conf_matrix), 2)
+
+## 3. domain knowledge
+model3 = hb_missing30 ~ age + comorbidity + num_specimen + num_dm_drugs + cerebrovascular + `heart(unspecified)` + hyperlipidemia + insomnia + anticoagulant + antihypertensive + antiplatelet  + statin + sex  + crea_missing30 + crea_missing90 + hb_missing90
+first_p_3 = glm(model3, data = dat, family = 'binomial')
+validation = dat %>% 
+  mutate(predicted = predict(first_p_3, dat %>% select(-hb_missing30))) %>%
+  rename(truth = hb_missing30) %>% select(truth, predicted)
+loss = pROC::auc(validation$truth, validation$predicted)
+threshold= mean(validation$predicted)
+predicted_values = ifelse(validation$predicted >= threshold, 1, 0)
+conf_matrix<-table(predicted_values,validation$truth)
+round(caret::sensitivity(conf_matrix), 2)
+round(caret::specificity(conf_matrix), 2)
+
+rm(dat)
+## 4. undersampling with domain knowledge var after train/test 
+
+rm(first_p_1, first_p_2,first_p_3, validation, loss, predicted_values, threshold, model3)
+
+## export
+jtools::export_summs(first_p_2,first_p_3,first_p, model.names = c("Domain Knowledge", "Stepwise Reg", "under sampling with Domain variables"), to.file = "xlsx")
+```
+
+
+1014 **repeat 10000次的 mean AUC： 看看是不是MAR，再看是不是multiple imputation// 換crea// 加檢驗值是否missing作為predictor**
+
+**樣本：3高患者**
+
+## Extract features
+
+**醫療資源利用情況**
+
+-   處方劑前180天的採檢次數
+
+-   門診次數、有無住院
+
+-   共病數目。
+
+-   有沒有其他(身體檢查)的項目,like weights & specimen.
+    用impute的數值impute數值。
+
+-   政府鼓勵社區藥局領藥：是否自費、是否2th 3th慢籤（特地去醫院拿藥）
+
+`開方和領藥是不同的事`
+
+**藥品使用狀況**
+
+-   有無使用口服藥物、口服藥物種類、使用幾種、是否使用insulin
+    （共病的數目，有糖尿病外的藥品？ 像是心血管疾病、腎臟問題）
+
+-   前180天之糖尿病處方次數。（規律回診的通常不會被抽）
+
+**基本資料**
+
+-   年齡(fix effect), 性別
+
+-   體重變化、量體重次數
+
+**change**
+
+腎功能指數的變化、看診的次數變化。
+
+# First part model
+
+[weighted logistic
+reg](https://towardsdatascience.com/weighted-logistic-regression-for-imbalanced-dataset-9a5cd88e68b)
+
+-   `1/10` 的bmi missing， 這邊用1～3隨機填補。
+
+-   num_doctor, num_prescription 可能有共線的問題, num_specimen
+    對missing的趨勢有高度的負相關。
+
+```{r}
+tt = data %>%
+  mutate_all(as.numeric)
+data.cor = cor(tt[, c(52, 33:51)], method = 'spearman')
+corrplot(data.cor)
+rm(tt)
+
+
+model = hb_missing30 ~ age + comorbidity + num_specimen + num_dm_drugs + cerebrovascular + `heart(unspecified)` + hyperlipidemia + insomnia + anticoagulant + antihypertensive + antiplatelet  + statin + sex  + crea_missing30 + crea_missing90 + hb_missing90
+first_p = glm(model, data = data, family = 'binomial')
+
+# AIC：不同模型的比較，差異不大。不如看sensitivity。
+
+
+
+## crea
+
+tt = data %>%
+  mutate_all(as.numeric)
+data.cor = cor(tt[, c(57, 3:10, 17:53, 54:56)], method = 'spearman')
+       # may put creamissing90 as ft.
+corrplot(data.cor)
+rm(tt)
+model = crea_missing30 ~ age + comorbidity + num_specimen + num_prescription + ckd + cancer + cerebrovascular + kidney + Loop_d + chro_180 + chro_0 + hb_missing30
+first_p = glm(model, data, family = 'binomial')
+```
+
+### improvement on logistic regression.
+
+-   `under sampling/ oversampling`: try to take 100% missing and 20%
+    non-missing, do CV
+
+doesn't improve much with cross entropy or AUC criteria.
+
+-   `penalty`: might not converge.
+
+doesn't improve much either QQ.
+
+- **logistic 到此為止。**HbA1c(22%missing)也許真的是MAR（和健保給付有關、要測血糖才能領錢），能做的改進有改features、換成crea以及用DNN。
+
+```{r}
+# under sampling
+majority = data %>%
+  filter(hb_missing30 == 0) %>%
+  select(age, comorbidity , num_specimen , num_dm_drugs , cerebrovascular , `heart(unspecified)` , hyperlipidemia , insomnia , anticoagulant , antihypertensive , antiplatelet  , statin, hb_missing30, sex, crea_missing30, crea_missing90, hb_missing90)
+tt = data %>%
+  filter(hb_missing30 == 1) %>%
+    select(age, comorbidity , num_specimen , num_dm_drugs , cerebrovascular , `heart(unspecified)` , hyperlipidemia , insomnia , anticoagulant , antihypertensive , antiplatelet  , statin, hb_missing30, sex, crea_missing30, crea_missing90, hb_missing90)
+Loss = 0.7 # 最好0.7以上
+
+for(i in 1:5000){
+df = majority[sample(5416, 1604), ] %>%
+  bind_rows(tt)
+index = sample(nrow(df), 0.7*nrow(df))
+train = df[index, ]
+validation = df[-index, ]
+model = hb_missing30 ~ age + comorbidity + num_specimen + num_dm_drugs + cerebrovascular + `heart(unspecified)` + hyperlipidemia + insomnia + anticoagulant + antihypertensive + antiplatelet  + statin + sex + crea_missing30 + crea_missing90 + hb_missing90
+first_p = glm(model, data = train, family = 'binomial')
+validation = validation %>% 
+  mutate(predicted = predict(first_p, validation %>% select(-hb_missing30))) %>%
+  rename(truth = hb_missing30)
+# loss = MLmetrics::LogLoss(validation$predicted, validation$truth)
+loss = pROC::auc(validation$truth, validation$predicted)
+if(loss > (Loss+1e-4)){
+  save(first_p, file = 'best_model.rda')
+  Loss = loss
+  cat("The AUC for local minima is ", loss, "\nModel saved successful! ", "\n")
+}
+}
+rm(tt, majority, df, train, validation, first_p, i, index, loss)
+print("stop")
+```
+```{r}
+## crea
+
+majority = data %>%
+  filter(crea_missing30 == 0) %>%
+  select(age, comorbidity, num_specimen, num_prescription, ckd, cancer, cerebrovascular, kidney, Loop_d, chro_180, chro_0,  hb_missing30, crea_missing30) # chro might related though
+tt = data %>%
+  filter(crea_missing30 == 1) %>%
+    select(age, comorbidity, num_specimen, num_prescription, ckd, cancer, cerebrovascular, kidney, Loop_d, chro_180, chro_0,  hb_missing30, crea_missing30)
+Loss = 0.81
+
+for(i in 1:5000){
+df = majority[sample(5416, 1604), ] %>%
+  bind_rows(tt)
+index = sample(nrow(df), 0.7*nrow(df))
+train = df[index, ]
+validation = df[-index, ]
+model = crea_missing30 ~ age + comorbidity + num_specimen + num_prescription + ckd + cancer + cerebrovascular + kidney + Loop_d + chro_180 + chro_0 + hb_missing30 # //
+first_p = glm(model, data = train, family = 'binomial')
+validation = validation %>% 
+  mutate(predicted = predict(first_p, validation %>% select(-crea_missing30))) %>%
+  rename(truth = crea_missing30)
+# loss = MLmetrics::LogLoss(validation$predicted, validation$truth)
+loss = pROC::auc(validation$truth, validation$predicted)
+if(loss > (Loss+1e-4)){
+  save(first_p, file = 'best_model.rda')
+  Loss = loss
+  cat("The AUC for local minima is ", loss, "\nModel saved successful! ", "\n")
+}
+}
+rm(tt, majority, df, train, validation, first_p, i, index, loss)
+```
+
+
+```{r}
+# weighted logistic
+w = data$hb_missing30
+w = ifelse(w == 1, 4, 1)
+first_p = glm(model, data, family = 'binomial', weights = w)
+rm(w)
+```
+
+## deep learning
+
+-   ANN, python
+
+[optimization of cut-off value](https://www.semanticscholar.org/paper/Calculating-the-best-cut-off-point-using-logistic-A-Soureshjani-Kimiagari/224e65a3899e4036f799fab1fe1ccd440bd489a0)
+
+[cross validation](https://www.r-bloggers.com/2015/09/predicting-creditability-using-logistic-regression-in-r-cross-validating-the-classifier-part-2-2/)
+
+- There is no manual optimization steps in the ANN2 packages though, I
+need to keep `tuning hyper-parameters`.
+
+- Even feed-forward network couldn't be useful in terms of AUC/
+sensitivity, maybe **change features would be practical.**
+
+```{r}
+set.seed(1213)
+index = sample(nrow(dat), 0.7*nrow(dat))
+tt = dat[index, ] %>%
+  mutate(value = 1,
+         bmi = paste0("bmi_", bmi))  %>% 
+  spread(bmi, value,  fill = 0 ) %>%
+  rename(truth = hb_missing30)
+validation = dat[-index, ]%>%
+  mutate(value = 1,
+         bmi = paste0("bmi_", bmi))  %>% 
+  spread(bmi, value,  fill = 0 ) %>%
+  rename(truth = hb_missing30)
+X_train <- tt %>% # shouldn't contain hb_missing30 here!!
+  select(-truth)
+y_train <- tt[, "truth"]
+
+NN <- neuralnetwork(X = X_train, y = y_train, hidden.layers = c(6, 3), optim.type = 'adam', learn.rates = 0.001, activ.functions = 'relu', sgd.momentum = 0.9, L1 = 1, n.epochs = 100, batch.size = 64, val.prop = 0.1)
+
+plot(NN)
+validation$predicted <- predict(NN, newdata = (validation %>% select(-truth)))$probabilities[, 'class_1']
+# eva
+loss = pROC::auc(validation$truth, validation$predicted)
+threshold= mean(validation$predicted, na.rm = T)
+predicted_values = ifelse(validation$predicted >= threshold, 1, 0)
+conf_matrix<-table(predicted_values,validation$truth)
+cat("AUC：", loss)
+cat("敏感度：", round(caret::sensitivity(conf_matrix), 2))
+cat("特異度", round(caret::specificity(conf_matrix), 2))
+
+
+rm(NN, X_train, y_train, index, tt, threshold)
+```
+
+```{r}
+set.seed(1213)
+
+index = sample(nrow(data), 0.7*nrow(data))
+tt = data[index, ]
+test = data[-index, ] %>%
+  select(age, comorbidity, num_specimen, num_prescription, ckd, cancer, cerebrovascular, kidney, Loop_d, chro_180, chro_0,  hb_missing30, crea_missing30)
+X_train <- tt %>% # shouldn't contain hb_missing30 here!!
+  select(age, comorbidity, num_specimen, num_prescription, ckd, cancer, cerebrovascular, kidney, Loop_d, chro_180, chro_0,  hb_missing30)
+y_train <- tt[, "crea_missing30"]
+
+first_p <- neuralnetwork(X = X_train, y = y_train, hidden.layers = c(6, 3), optim.type = 'adam', learn.rates = 0.001, activ.functions = 'relu', sgd.momentum = 0.9, L1 = 1, n.epochs = 300, batch.size = 64, val.prop = 0.1)
+
+plot(first_p)
+dnn_y <- predict(first_p, newdata = (test %>% select(-crea_missing30)))$probabilities[, 'class_1']
+test = test %>%
+  select(crea_missing30) %>%
+  mutate(predicted = dnn_y) %>%
+  rename(truth = crea_missing30)
+pROC::auc(pROC::roc(test$truth, test$predicted))
+
+rm(X_train, y_train, index, tt, dnn_y)
+
+## jump to evaluation
+dnn_y <- predict(first_p, newdata = (data %>% select(age, comorbidity, num_specimen, num_prescription, ckd, cancer, cerebrovascular, kidney, Loop_d, chro_180, chro_0,  hb_missing30)))$probabilities[, 'class_1']
+feature = data %>%
+  select(crea_missing30) %>%
+  rename(truth = crea_missing30) %>%
+  mutate(crea_missing30 = dnn_y)
+```
+
+
+## evaluation
+
+`optimal cutoff value` logistic
+
+`accuracy`
+
+FP & FN: 2 x 2 table & visualize `AUC`, cross-entropy loss.(敏感度
+特異度)
+
+- a 0.8 AUC in training sample reveals overfitting
+
+```{r}
+conf_matrix %>%
+  data.frame() %>% 
+  mutate(predicted_values = ifelse(predicted_values == 1, "good", "bad")) %>%
+  mutate(predicted_values = factor(predicted_values, levels = c("good", "bad"))) %>%
+  group_by(Var2) %>% 
+  mutate(total = sum(Freq)) %>% 
+  ungroup() %>% 
+  ggplot(aes(Var2, predicted_values, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), size = 8) +
+  scale_fill_gradient(low = "#ea4434", high = "#badb33") +
+  scale_x_discrete(position = "top") +
+  geom_tile(color = "black", fill = "black", alpha = 0) +
+  theme_bw()
+  
+
+validation %>%
+  mutate_at('truth', as.character) %>%
+  ggplot(aes(x=predicted, fill=truth)) + 
+  # geom_density(alpha=.3)+ # //
+  geom_histogram(binwidth=.05, position="dodge") +
+  labs(title = "The Distribution of Stepwise Predicted Probability", 
+       subtitle = 'Take mean predicted value as threshold') + 
+  theme_bw()
+cowplot::plot_grid(p1, p2, labels = "AUTO")
+
+```
+
+
+```{r}
+load('best_model.rda')
+feature = data %>%
+  # select(age, comorbidity , num_specimen , num_dm_drugs , cerebrovascular , `heart(unspecified)` , hyperlipidemia , insomnia , anticoagulant , antihypertensive , antiplatelet  , statin, hb_missing30, sex, crea_missing30, crea_missing90, hb_missing90) %>%
+  rename(truth = hb_missing30)
+feature$hb_missing30 = predict(first_p_2, feature)
+# names(test)[2] = 'hb_missing30'; feature = test; rm(test)
+
+# crea
+feature = data %>%
+  select(age, comorbidity, num_specimen, num_prescription, ckd, cancer, cerebrovascular, kidney, Loop_d, chro_180, chro_0,  hb_missing30, crea_missing30) %>%
+  rename(truth = crea_missing30)
+feature$crea_missing30 = predict(first_p, feature)
+
+
+feature %>%
+  mutate_at('truth', as.character) %>%
+  ggplot(aes(x=hb_missing30, fill=truth)) + # //
+  geom_histogram(binwidth=.5, position="dodge") +
+  labs(title = "The distribution of stepwise predicted missing probability", 
+       subtitle = 'take mean predicted value as threshold')
+feature %>%
+  mutate_at('truth', as.character) %>%
+  ggplot(aes(x=hb_missing30, fill=truth)) + geom_density(alpha=.3)+ # //
+  labs(title = "The density distribution of stepwise predicted missing probability", 
+       subtitle = 'take mean predicted value as threshold')
+# pROC::auc(pROC::roc(feature$truth, feature$crea_missing30)) # //
+```
+
+- reveals that missing 90 as well as within 30ds would definitely be MAR. 
+
+### Notes
+
+interpretation: 每增加一單位的採檢次數，HbA1c前30天 missing 的勝算增加
+`exp(-0.01106026) = 0.989`倍
+
+-   原因：missing比例少/
+    `可能MAR， 直接用multiple imputation，和其比較`/
+    變數沒放（健保藥品給付束縛 導致MAR）/ 看t statistic
+
+-   **調整 model ｜ 換creatinine（臨床情況 \<- NMAR）**
+
+-   額外研究：比較不同程度first model的好壞，對研究結果的影響。
+
+**從文獻看應該放哪些變數、logistic with unbalanced data**
+
+
+## Improvement: 變數篩選
+
+-   lasso regression, PCA, elastic
+
+-   對missing的類別加`weight`(疾病盛行率低 為稀有事件)
+
+# 0923, 2021 筆記
+
+**distribution, like age**
+
+`看病人的年齡分布，查閱流行病prevalence，並且重新整理診斷碼(三高)`
+
+`之後再和老師詢問健保給付 & 慢籤的事情（醫院資料：健保 or 自費）`：用在'設計方法'上。
+
+不給付：醫生考量病人負擔 自費會在醫院、不在健保資料庫。
+
+丟time year dummy
+
+有無missing兩群人什麼的的dist顯著不同
+
+橫軸日期，縱軸檢驗值
+
+重複測量： feature的相關性（\<.07）、前後的相關性。
+
+`interaction term/ conpounding factor?`, 取ln(), dummy variable?
+
+(連90天前都，沒有值的人不是太健康而不需要抽血// 健保，missing的原因很可能為random)
+（crea腎功能差的才會抽）
+
+introduction/ method/ result/ discuss (用word檔先寫)
+
+
+
+# multiple imputation
+
+- 先針對有值的建立模型，之後針對沒值的，我會建立第2個模型，用90天的資料訓練.
+
+- 一樣是用相關性篩選變數
+```{r}
+data = data %>%
+  filter(!(is.na(HbA1c_30day)))
+
+tt = data %>%
+  mutate_all(as.numeric)
+data.cor = cor(tt[, c(13, 46: 53, 56)], method = 'spearman') # //
+corrplot(data.cor)
+rm(tt)
+
+model = HbA1c_30day ~ age + num_doc + comorbidity + num_dm_drugs + blood + `heart(unspecified)` + hypertension + antihypertensive + Insulins + Sulfonylureas + Thiazolidinediones + chro_180
+
+sec_p = lm(model, data)
+
+```
+
+### 10 fold cross validation
+```{r}
+dat = data %>%
+  filter(hb_missing30 == 0) %>%
+  select(-PERSONID2, -index_date, -hb_missing30, -hb_missing90, -crea_missing30, -crea_missing90, -SMK, -SmokingYear, 
+         -HbA1c_90day, -creatinine_30day, -creatinine_90day,
+         -Sulfonylureas, -SGLT2, -Biguanides) %>%    mutate(value = 1,
+         bmi = paste0("bmi_", bmi))  %>% 
+  spread(bmi, value,  fill = 0 ) %>%
+  rename(truth = HbA1c_30day) %>% select(-bmi_0)
+set.seed(1213);index = sample(nrow(dat), 0.7*nrow(dat));train_dat = dat[index, ];val_dat = dat[-index,];
+# baseline
+model = truth ~ .
+set.seed(1213)
+train_control <- trainControl(method = "cv",
+                              number = 10, repeats = 1000)
+train_1 = train(model, data = dat,
+               method = "lm",
+               trControl = train_control)
+print(train_1); summary(train_1);
+
+# stepwise
+intercept_only <- lm(truth ~ 1, data=dat)
+train_2 <- step(intercept_only, direction='forward', scope=formula(train_1), trace=0)
+summary(train_2)
+mean((dat$truth - predict(train_2, dat))^2)
+
+# domain knowledge
+model = truth ~ age + num_doc + comorbidity + num_dm_drugs + blood + `heart(unspecified)` + hypertension + antihypertensive + Insulins + `DPP-4` + Thiazolidinediones + chro_180
+train_3 = train(model, data = dat,
+               method = "lm",
+               trControl = train_control)
+summary(train_3);print(train_3);
+
+# validation set approach
+Loss = 1.4
+for(i in 1:5000){
+index = sample(nrow(dat), 0.7*nrow(dat))
+train = dat[index, ]
+validation = dat[-index, ]
+train_4 = lm(model, data = train)
+validation = validation %>% 
+  mutate(predicted = predict(train_4, validation %>% select(-truth))) 
+loss = mean((validation$truth - validation$predicted)^2)
+if(loss < (Loss-1e-4)){
+  save(train_4, file = 'best_model.rda')
+  Loss = loss
+  cat("The MSE for local minima is ", loss, "\nModel saved successful! ", "\n")
+}
+}
+load("best_model.rda")
+mean((dat$truth - predict(train_4, dat))^2)
+summary(train_4)
+
+export_summs(train_1$finalModel, train_2, train_3$finalModel, train_4, 
+             to.file = "xlsx", 
+             model.names = c("Reference", "Stepwise Reg", "Domain Knowledge", "Validation Set Approach"))
+rm(intercept_only)
+```
+
+### deep learning
+```{r}
+set.seed(1213)
+dat = data %>%
+  filter(hb_missing30 == 0) %>%
+  select(-PERSONID2, -index_date, -hb_missing30, -hb_missing90, -crea_missing30, -crea_missing90, -SMK, -SmokingYear, 
+         -HbA1c_90day, -creatinine_30day, -creatinine_90day) %>%    mutate(value = 1,
+         bmi = paste0("bmi_", bmi))  %>% 
+  spread(bmi, value,  fill = 0 ) %>%
+  rename(truth = HbA1c_30day) %>% select(-bmi_0)
+index = sample(nrow(dat), 0.7*nrow(dat))
+train = dat[index, ]
+validation = dat[-index, ]
+X_train <- train %>% # shouldn't contain hb_missing30 here!!
+  select(-truth)
+y_train <- train[, "truth"]
+
+sec_p <- neuralnetwork(X = X_train, y = y_train, hidden.layers = c(6, 3), optim.type = 'adam', learn.rates = 0.001, activ.functions = 'relu', sgd.momentum = 0.9, L1 = 1, n.epochs = 300, batch.size = 64, val.prop = 0.1)
+
+plot(sec_p)
+validation$predicted <- as.numeric(predict(sec_p, newdata = (validation %>% select(-truth)))$predictions)
+# eva
+loss = mean((validation$truth - validation$predicted)^2)
+cat("MSE is: ", loss)
+
+# rm(X_train, y_train, index, sec_p, loss)
+```
+
+### missing forest
+<https://rpubs.com/lmorgan95/MissForest>
+
+
+
+## eva
+
+```{r}
+load('best_model.rda')
+feature = data %>%
+  select(HbA1c_30day, age, num_doc, comorbidity, num_dm_drugs, blood, `heart(unspecified)`, hypertension, antihypertensive, Insulins, Sulfonylureas, Thiazolidinediones, chro_180) %>%
+  rename(truth = HbA1c_30day)
+feature$HbA1c_30day = predict(sec_p, feature)
+# names(test)[2] = 'hb_missing30'; feature = test; rm(test)
+
+cat("MSE is: ", mean((feature$HbA1c_30day- feature$truth)^2))
+summary(sec_p)
+```
+
+## 11/12 
+
+- crea + HbA1c: Cross Table. 看他們的`correlation`
+
+可以用 missing forest來做multiple imputation。（data driven/ 不會受到MAR影響/assumption free.）
+
+- lab 值missing的pattern： MAR
+
+- 插補值的比較：2 part, multiple, missing forest, DNN.
+
+## 1202 
+
+- not interpretation: okay
+
+- `y 應該放是否missing`， X要放檢驗值。(+20% missing does work.)
+
+- 取代part I 的model，assumption free。
+
+`和其他模型比較： optional`
+
+開始寫書面報告
+
+```{r}
+library(missForest)
+germancredit = woeBinning::germancredit
+
+set.seed(111)
+train_index <- sample(nrow(germancredit), 700) 
+
+train <- germancredit[train_index, ]
+train_X <- prodNA(select(train, -creditability), 0.2)
+
+test <- germancredit[-train_index, ]
+test_X <- prodNA(select(test, -creditability), 0.2)
+
+vis_miss(rbind(train_X, test_X), show_perc = F) + 
+  coord_flip()
+
+imp_train_X <- missForest(train_X)$ximp
+rf <- randomForest(x = imp_train_X, y = train$creditability)
+
+train_test_X <- rbind(test_X, imp_train_X)
+imp_test_X <- missForest(train_test_X)$ximp[1:nrow(test_X), ]
+
+# 5) predict for test
+pred_test <- predict(rf, imp_test_X, type = "prob")
+
+# 6) test ROC & AUC
+test_scores <- data.frame(event_prob = pred_test[ ,2], labels = test$creditability)
+
+test_roc_v1 <- PRROC::roc.curve(scores.class0 = test_scores[test_scores$labels == "good", ]$event_prob, # scores for the POSITIVE class
+                      scores.class1 = test_scores[test_scores$labels == "bad", ]$event_prob, # scores for the NEGATIVE class
+                      curve=T)
+
+test_roc_v1$auc
+```
+
+## MissForest 
+
+- The idea is using non-Missing predicted variable to build a model,  since it could only tolerate missing independent variables rather than missing response Var.(`This model may not take advantage of MissForest`)
+
+- Moreover, I'd like to build a model of
+
+y_90 ~ y_30 + (...) 
+分層的missing比例？？
+
+To predict 90 days' data.
+
+
+```{r}
+data = data %>% select(-PERSONID2, -index_date, -creatinine_90day, -HbA1c_90day, -SMK, -SmokingYear, -hb_missing30, -hb_missing90, -crea_missing30, -crea_missing90, -creatinine_30day) %>%
+  mutate_at("num_doc", as.double) %>% 
+  mutate_at(c("sex", "chro_180", "chro_0", "weight_missing"), as.factor) %>%
+  filter(is.na(HbA1c_30day) == F)
+
+library(missForest)
+set.seed(1213)
+index <- sample(nrow(data), 0.7*nrow(data)) 
+
+# predicted var: HbA1c_30day
+train <- data[index, ]
+train_X = train %>% select(-HbA1c_30day)
+test <- data[-index, ]
+test_X = test %>% select(-HbA1c_30day)
+
+visdat::vis_miss(rbind(train_X, test_X), show_perc = F) + 
+  coord_flip() + labs(subtitle = "I didn't include HbA1c_90 as independent var here")
+# train_X <- prodNA(select(train, -creditability), 0.2)
+# imp_train_X <- missForest(train_X)$ximp
+imp_train_X = train_X
+rf <- randomForest(x = imp_train_X, y = train$HbA1c_30day)
+
+train_test_X <- rbind(test_X, imp_train_X)
+# imp_test_X <- missForest(train_test_X)$ximp[1:nrow(test_X), ]
+imp_test_X = train_test_X
+pred_test <- predict(rf, test_X)
+
+tibble(truth = test %>% select(HbA1c_30day) %>% pull(), 
+       guess = pred_test) %>% 
+  mutate(index = 1:length(pred_test), 
+         error = truth - guess, 
+         rmse = sqrt(mean((guess - truth)^2))) %>%
+  ggplot() + aes(index, error) + geom_jitter()
+# The RMSE is 1.335, not bad.
+```
+
+```{r}
+data = data %>% select(-PERSONID2, -index_date, -creatinine_90day, -SMK, -SmokingYear, -hb_missing30, -hb_missing90, -crea_missing30, -crea_missing90, -creatinine_30day) %>%
+  mutate_at("num_doc", as.double) %>% 
+  mutate_at(c("sex", "chro_180", "chro_0", "weight_missing"), as.factor) %>%
+  filter(is.na(HbA1c_30day) == F)
+
+set.seed(1213)
+index <- sample(nrow(data), 0.7*length(data)) 
+train <- data[index, ]
+train_X <- prodNA(select(train, -HbA1c_30day), 0.2)
+  # 是否要對y_30填 20%
+test <- data[-index, ]
+test_X <- prodNA(select(test, -HbA1c_30day), 0.2)
+visdat::vis_miss(rbind(train_X, test_X), show_perc = F) + 
+  coord_flip()
+
+train_X = as.data.frame(train_X)
+imp_train_X <- missForest(train_X)$ximp
+rf <- randomForest(x = imp_train_X, y = train$HbA1c_30day)
+train_test_X <- rbind(test_X, imp_train_X)
+train_test_X = as.data.frame(train_test_X)
+imp_test_X <- missForest(train_test_X)$ximp[1:nrow(test_X), ]
+
+pred_test <- predict(rf, imp_test_X)
+tibble(truth = test %>% select(HbA1c_30day) %>% pull(), 
+       guess = pred_test) %>% 
+  mutate(index = 1:length(pred_test), 
+         error = truth - guess, 
+         rmse = sqrt(mean((guess - truth)^2))) %>%
+  ggplot() + aes(index, error) + geom_jitter()
+
+# RMSE = 1.16, improved!
+```
+
+```{r}
+data = data %>% select(-PERSONID2, -index_date, -creatinine_90day, -SMK, -SmokingYear, -hb_missing30, -hb_missing90, -crea_missing30, -crea_missing90, -creatinine_30day) %>%
+  mutate_at("num_doc", as.double) %>% 
+  mutate_at(c("sex", "chro_180", "chro_0", "weight_missing"), as.factor) %>%
+  filter(is.na(HbA1c_90day) == F)
+
+set.seed(1213)
+train_index <- sample(nrow(data), 0.7*length(data)) 
+train <- data[train_index, ]
+train_X <- prodNA(select(train, -HbA1c_90day), 0.2)
+test <- data[-train_index, ]
+test_X <- prodNA(select(test, -HbA1c_90day), 0.2)
+visdat::vis_miss(rbind(train_X, test_X), show_perc = F) + 
+  coord_flip()
+
+train_X = as.data.frame(train_X)
+imp_train_X <- missForest(train_X)$ximp
+rf <- randomForest(x = imp_train_X, y = train$HbA1c_90day)
+train_test_X <- rbind(test_X, imp_train_X)
+train_test_X = as.data.frame(train_test_X)
+imp_test_X <- missForest(train_test_X)$ximp[1:nrow(test_X), ]
+
+tibble(truth = test %>% select(HbA1c_30day) %>% pull(), 
+       guess = imp_test_X %>% select(HbA1c_30day) %>% pull()) %>% 
+  filter(is.na(truth) == F) %>%
+  mutate(index = 1:length(guess), 
+         error = truth - guess, 
+         rmse = sqrt(mean((guess - truth)^2))) %>%
+  ggplot() + aes(index, error) + geom_jitter()
+
+# rmse = 0.566  # 隱憂是樣本小/ overfitting
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

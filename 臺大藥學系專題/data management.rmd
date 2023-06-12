@@ -1,0 +1,812 @@
+---
+title: EHR
+author: Duke Liu
+date: "2021/9/26"
+output:
+  prettydoc::html_pretty:
+    theme: leonids
+    highlight: github
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, eval = F)
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(vroom)
+library(showtext)
+showtext_auto()
+
+```
+
+# Data management
+
+## dataset
+
+we use `門診處方醫令12-17`,
+`17_檢驗報告(201306後)_1 & 17_檢驗報告(201306後)_2`, `門診臨床診斷` in
+our first trial. (20210827)
+
+## sub-sampling diabetes patients by their gifted drugs
+
+The num of PERSONID2 is 33k, and num of PERSONID2 having visits more
+than mean visits is 9k.
+
+we found that mean num of prescription among general/ DM inpatients is
+`63.51/30`, and the s.d is `80.34/28`. So the dist of num of
+prescription is really unbalanced.
+
+-   `id` is all we wanted in this stage, there are **35k** diag patient
+    in this sample.
+
+```{r, message=F, warning=F}
+diabete_drug = c("NES4LB96", "DIA4LB59", "ONG4LB85", "GLI4LB09", "TRA4LB89", "VIC1LB90", "HUM1LB04", "ACT4LB42","GLN4LB36", "AMA4LB13", "NOV1LB65", "TOU1LBA1", "FOR4LB99", "JAN4LB71", "HUM1LB84", "GLI4LB03", "CAN4LBA4", "NO 1LB56", "NO 1LB65", "NOV1LB56", "LEV1LB10", "HUM1LB19", "NOV4LB06", "JAR4LB98", "HUM1LB78", "GAL4LB88", "BYE1LB86", "TRU1LBA0", "HUM1LB94", "BYE1LB87", "HUM1LB05", "AVA4LB53", "NOV1LB95", "GLU4LB44", "LAN1LB62", "API1LB91", "GLU4LB36", "GLI4LB57", "GLU4LB32", "LOD4LB57")
+
+d1 = vroom(file.choose(), locale= locale(encoding = stringi::stri_enc_get()), progress = T, col_select = c(PERSONID2, DRUGCODE), show_col_types = F) %>%
+  filter(DRUGCODE %in% diabete_drug) # 門診處方12_14, 15_17 (各100萬)
+
+id = vroom(file.choose(), locale= locale(encoding = stringi::stri_enc_get()), progress = T, col_select = c(PERSONID2, DIAGNOSISTYPE, DIAGNOSISCODE), show_col_types = F)  %>% # 門診臨床診斷
+  filter((PERSONID2 %in% d1) & str_detect(DIAGNOSISCODE, '250')) %>% distinct(PERSONID2) %>%
+  pull(PERSONID2)  # diag + drug 35k
+
+###
+data %>% group_by(PERSONID2) %>%
+  distinct(DIAGNOSISTYPE, .keep_all = T) %>%
+  count(PERSONID2) %>% filter(n > 1) # 主, 次診斷皆DM 25k
+###
+rm(d1, data, diabete_drug)
+
+## age dist
+data %>%
+  ggplot(aes(age)) + geom_bar(fill = "#E69F00") + 
+  theme_bw() 
+max(data$age)
+```
+
+### sort drugs
+
+-   filter `metformin, DPP4-i, SGLT2i`
+
+## Index event
+
+門診處方的`用藥開始日`為準
+
+在藥物流行病學中，符合一個好的cohort定義，不建議從門診的年份開始往前搜處方，應往後看。
+
+-   `reserve 180 days` for baseline characteristic assessment. (so the
+    prescription starts at 7/1, 12)
+
+-   `firsttime` is all we get. The number is around 13k.
+
+```{r, message=F, warning=F}
+drugcode %>% select(1, 5) %>% 
+  filter(sort == 'SGLT2' | sort =='DPP-4') %>% # Biguanides 
+  distinct(ntu_code) %>% pull -> diag_drugs
+
+# 門診處方12_17
+data = vroom(file.choose(), locale= locale(encoding = stringi::stri_enc_get()), progress = T, col_select = c(PERSONID2, DRUGCODE, CREATEDATETIME), show_col_types = F) %>%
+  filter((PERSONID2 %in% Id) & DRUGCODE %in% diag_drugs) 
+
+data = data %>%
+  mutate(CREATEDATETIME = as_date(str_extract(CREATEDATETIME, pattern = '\\d+\\/\\d+\\/\\d+')))
+
+data = data %>% group_by(PERSONID2) %>% 
+  mutate(event = min(CREATEDATETIME)) %>% 
+  ungroup() %>% select(1,4) %>% distinct(PERSONID2, .keep_all = T)
+
+firsttime = firsttime %>% 
+  bind_rows(data) %>% group_by(PERSONID2) %>%
+  mutate(event = min(event)) %>%  ungroup() %>% 
+  distinct(PERSONID2, .keep_all = T)
+
+firsttime = firsttime %>% filter(event > ymd(20120630))
+save(firsttime, file = 'firsttime.rda')
+```
+
+### age \> 20
+
+-   樣本中最年輕的就21歲\~ 沒必要篩選。
+
+```{r, message=F, warning=F}
+data = vroom(file.choose(), locale= locale(encoding = stringi::stri_enc_get()), progress = T, col_select = c(PERSONID2, BIRTHDAY), show_col_types = F) %>%
+  mutate(BIRTHDAY = as_date(paste0(BIRTHDAY, '/01'))) # 基本資料
+
+data %>% right_join(firsttime, by = 'PERSONID2') %>%
+  mutate(age = as.numeric(event - BIRTHDAY) %/% 365.25) %>%
+  filter(age >= 20)
+
+rm(data)
+```
+
+### is there a metformin bef within 180 days?
+
+-   最後合格的樣本只有`7020`
+
+```{r, message=F, warning=F}
+drugcode %>% select(1, 5) %>% 
+  filter(sort == 'Biguanides') %>%  
+  distinct(ntu_code) %>% pull -> metformin
+
+# 門診處方12_14, 15_17
+data = vroom(file.choose(), locale= locale(encoding = stringi::stri_enc_get()), progress = T, col_select = c(PERSONID2, DRUGCODE, CREATEDATETIME), show_col_types = F) %>%
+  filter((PERSONID2 %in% firsttime$PERSONID2) & (DRUGCODE %in% metformin)) 
+
+data = data %>%
+  mutate(CREATEDATETIME = as_date(str_extract(CREATEDATETIME, pattern = '\\d+\\/\\d+\\/\\d+')))
+
+data %>% left_join(firsttime, by = 'PERSONID2') %>%
+  mutate(timediff = as.numeric(event-CREATEDATETIME)) %>%
+  filter(timediff <= 180 & timediff > 0) %>%
+  distinct(PERSONID2) %>% pull() -> gg
+firsttime = firsttime %>% filter(PERSONID2 %in% gg)
+
+rm(gg, data)
+
+save(firsttime, file = 'firsttime.rda')
+```
+
+And `Sample Selection` finished here.
+
+## combined with specimen data
+
+HbA1c and creatinine would be evaluated separately. That is, the 2 tests
+are independent.
+
+-   `2025/ 549` cases with `creatinine/ HbA1c` data are missing within
+    90 days bef 1th ddp4i prescription. The percentage are
+    `28.8 %/ 7.8 %` separately.
+
+-   343 cases are completely missing within 90 days out of 7020 obs.
+
+```{r, message=F, warning=F}
+# 檢驗報告(新 13年後)_1 & 2
+data = vroom(file.choose(), locale= locale(encoding = stringi::stri_enc_get()), progress = T, col_select = c(PERSONID2, ORIGINALLABORDERFULLNAME, CREATEDATETIME, CONFIRMRESULT, RESULTUNIT), show_col_types = F) %>%
+  filter(PERSONID2 %in% firsttime$PERSONID2) 
+data = data %>%
+  filter((str_detect(ORIGINALLABORDERFULLNAME, 'HbA1c') | str_detect(ORIGINALLABORDERFULLNAME, 'Creatinine')) & !str_detect(ORIGINALLABORDERFULLNAME, 'Urine') & 
+           !str_detect(ORIGINALLABORDERFULLNAME, 'UPCR')) 
+data = data %>%
+  mutate(CREATEDATETIME = as_date(str_extract(CREATEDATETIME, pattern = '\\d+\\/\\d+\\/\\d+')))
+
+data %>% left_join(firsttime, by = 'PERSONID2') %>%
+  mutate(timediff = as.numeric(event - CREATEDATETIME)) %>%
+  filter(timediff <= 90 & timediff >= 0) %>%
+  select(-CREATEDATETIME) -> specimen_new
+
+save(specimen_new, file = 'specimen.rda')
+```
+
+## 2021 1021 慢籤
+
+-   第一筆處方是否為慢籤
+
+-   前180天是否開過慢籤
+
+```{r}
+## 門診處方
+chro = vroom(file.choose(), locale= locale(encoding = 'big-5'), progress = T, col_select = c(PERSONID2, DRUGCODE, CREATEDATETIME, TOTALREFILLNO), show_col_types = F) %>%
+  filter(PERSONID2 %in% data$PERSONID2) 
+chro = chro %>% mutate(CREATEDATETIME = as_date(str_extract(CREATEDATETIME, pattern = '\\d+\\/\\d+\\/\\d+')))
+  
+t1 = data %>% select(index_date, PERSONID2) %>%
+  left_join(chro, by = "PERSONID2") %>%
+  filter(as.numeric(index_date - CREATEDATETIME) >= 0 &
+           as.numeric(index_date - CREATEDATETIME) <= 180) %>% mutate(TOTALREFILLNO = case_when(
+             TOTALREFILLNO == 2 ~ '1', 
+             TOTALREFILLNO == 3 ~ '1', 
+             T ~ '0'
+           )) %>%
+  select(PERSONID2, TOTALREFILLNO) %>% 
+  rename(chro = TOTALREFILLNO) %>%
+  mutate_at('chro', as.numeric) %>%
+  group_by(PERSONID2) %>% summarise(chro_180 = sum(chro)) %>%
+  ungroup() %>%
+  mutate(chro_180 = ifelse(chro_180 > 0 , 1, 0))
+  
+t2 = data %>% select(index_date, PERSONID2) %>%
+  left_join(chro, by = "PERSONID2") %>%
+  filter(index_date == CREATEDATETIME) %>% mutate(TOTALREFILLNO = case_when(
+             TOTALREFILLNO == 2 ~ '1', 
+             TOTALREFILLNO == 3 ~ '1', 
+             T ~ '0'
+           )) %>%
+  select(PERSONID2, TOTALREFILLNO) %>% 
+  rename(chro = TOTALREFILLNO) %>%
+  mutate_at('chro', as.numeric) %>%
+  group_by(PERSONID2) %>% summarise(chro_0 = sum(chro)) %>%
+  ungroup() %>%
+  mutate(chro_0 = ifelse(chro_0 > 0 , 1, 0))
+
+data = data %>%
+  left_join(t1, by = "PERSONID2") %>%
+  left_join(t2, by = "PERSONID2")
+
+rm(t1, t2)
+# save(data, file = "ckpt.rda")
+```
+
+| 連續處方籤類型 | perc |
+|----------------|------|
+| 0              | 18.6 |
+| 1              | 3    |
+| 2              | 10   |
+| 3              | 71.1 |
+
+# New session
+
+## load clean data
+
+-   每人在第一次處方前30天、前90天都可能會有重複測量的資料，這邊先取離處方日最近的（samples：
+    22132 reduced to 16855）
+
+-   Creatinine有兩種測量單位，分別是`mg/dL`，`mL/min/1.73 m^2`
+    這邊取前者；HbA1c統一是`%`
+
+-   這邊會取第一次處方`前30天 & 前90天`的資料。
+
+-   大部分的人每個檢體只有一筆資料，1萬多個採檢值裏面有30多人同一天採了兩筆（誤差在`+-1`之內），故只取其中較大的一筆就好。
+
+-   HbA1c 裏面有一項`>12.0` , 比例約佔1/200 ,
+    這邊用`runif(12,16)`去代替他們。
+
+`Note`: mL/min/1.73 m\^2 是Creatinine
+(Blood)，檢驗資料佔Creatinine不到1/10，且有做Creatinine
+(Blood)的病人都會做Creatinine的採檢（`mg/dL`）。故選擇Creatinine作為主要項目。
+
+```{r, message=F, warning=F}
+## load ckpt data
+load('specimen.rda')
+rm(drugcode, diagnosed_patient)
+specimen_new %>% 
+  mutate(specimen = case_when(
+    str_detect(ORIGINALLABORDERFULLNAME, 'Creatinine') ~ 'Creatinine',
+    str_detect(ORIGINALLABORDERFULLNAME, 'HbA1c') ~ 'HbA1c', 
+    T ~ 'nooo'
+  )) %>% count(PERSONID2) %>% mutate_at('n', as.character) %>%
+  select(n) %>% rename(count = n) %>% count(count) %>%
+  mutate(cc = case_when(as.numeric(count) < 11 ~ count, 
+                        as.numeric(count) >=  11 & as.numeric(count) < 21~ '11-20',
+                        as.numeric(count) >=  21 & as.numeric(count) < 31~ '21-30',
+                        as.numeric(count) >=  31 & as.numeric(count) < 41~ '31-40',
+                        T ~ '> 40')) %>% group_by(cc) %>%
+  summarise(value = sum(n)) %>% ungroup() %>%
+  mutate(index =as.numeric(str_extract(cc, '\\d+'))) %>%
+  arrange(index) %>%
+  ggplot() + aes(cc,value) %>% geom_bar(stat = 'identity') +
+  labs(title = '第一筆處方過去90天內的採檢次數')
+
+
+specimen_new = specimen_new %>% 
+  mutate(specimen = case_when(
+    str_detect(ORIGINALLABORDERFULLNAME, 'Creatinine') ~ 'Creatinine',
+    str_detect(ORIGINALLABORDERFULLNAME, 'HbA1c') ~ 'HbA1c', 
+    T ~ 'nooo'
+  )) %>% 
+  select(-ORIGINALLABORDERFULLNAME) %>% 
+  mutate(specimen = case_when(
+    specimen == 'Creatinine' & (timediff <=30 & timediff >= 0) ~ 'creatinine_30day',
+    specimen == 'Creatinine' & (timediff <=90 & timediff > 30)  ~ 'creatinine_90day',
+    specimen == 'HbA1c' & (timediff <=30 & timediff >= 0) ~ 'HbA1c_30day',
+    specimen == 'HbA1c' & (timediff <=90 & timediff > 30) ~ 'HbA1c_90day'
+  )) %>% 
+  # 這邊不能直接執行，要把90用30代替
+  filter(RESULTUNIT != 'mL/min/1.73 m^2') %>%
+  group_by(PERSONID2, specimen) %>%
+  mutate(aa = min(timediff)) %>% 
+  filter(timediff == aa) %>% ungroup() %>% 
+  select(-aa) %>%
+  mutate(CONFIRMRESULT = ifelse(CONFIRMRESULT == '>12.0', runif(1, 12, 16), CONFIRMRESULT)) %>%
+  mutate_at('CONFIRMRESULT', as.numeric) %>%
+  group_by(PERSONID2, specimen) %>% 
+  mutate(aa = max(CONFIRMRESULT)) %>% ungroup() %>%
+  filter(CONFIRMRESULT == aa) %>% select(-aa) %>%
+  group_by(PERSONID2, specimen) %>% mutate(ii = row_number()) %>%
+  ungroup() %>% filter(ii == 1) %>% select(-ii)
+
+rm(drugcode, diagnosed_patient)
+```
+
+## 繪圖！percentage of missing `creatinine`, `HbA1c`.
+
+```{r, message=F, warning=F}
+c = specimen_new %>% 
+  filter(str_detect(specimen, 'creatinine')) %>%
+  distinct(PERSONID2) %>% nrow()
+h = specimen_new %>% 
+  filter(str_detect(specimen, 'HbA1c')) %>%
+  distinct(PERSONID2) %>% nrow()
+tibble(specimen = c('糖化血色素', '肌酸酐'), 
+       missing_30 = c(1604, 3558), 
+       non_missing = c(7020-1604, 7020-3558)) %>%
+  gather('sort', 'value', 2:3) %>%
+  ggplot(aes(x = specimen, y = value, fill = sort)) +
+  geom_bar(stat = 'identity', position = 'dodge') +
+  labs(title = 'EHR生化檢驗值 處方前90天內 missing的人數比例', 
+       subtitle = '樣本母體為12-17年門診之糖尿病患者',
+       x = '檢體名稱', y = '人數') +
+  scale_fill_manual("sort", values = c("non_missing" = "darkseagreen2", "missing_30" = "chocolate2")) +
+  theme_bw()
+
+ccc = specimen_new %>% 
+  filter(specimen == 'creatinine_30day') %>%
+  distinct(PERSONID2) %>% nrow()
+hhh = specimen_new %>% 
+  filter(specimen == 'HbA1c_30day') %>%
+  distinct(PERSONID2) %>% nrow()
+cc = specimen_new %>% 
+  filter(specimen == 'creatinine_90day') %>%
+  distinct(PERSONID2) %>% nrow()
+hh = specimen_new %>% 
+  filter(specimen == 'HbA1c_90day') %>%
+  distinct(PERSONID2) %>% nrow()
+tibble(specimen = c('糖化血色素', '肌酸酐'), 
+       missing_90 = c(549, 2025),
+       non_missing = c(7020-549, 7020-2025)) %>%
+  gather('sort', 'value', 2:3) %>%
+  ggplot(aes(x = specimen, y = value, fill = sort)) +
+  geom_bar(stat = 'identity', position = 'dodge') +
+  labs(title = 'EHR生化檢驗值 處方前30/90天內 missing的人數比例', 
+       subtitle = 'missing_90指的是前90天missing的',
+       x = '檢體名稱', y = '人數') +
+  scale_fill_manual("sort", values = c("non_missing" = "grey69", "missing_90" = "navajowhite")) + 
+  theme_bw()
+
+
+cowplot::plot_grid(p1, p2, labels = "AUTO")
+
+rm(h, c, cc, hh,ccc, hhh)
+```
+
+## dist of HbA1c, Creatinine
+
+Are there Outliers?
+
+-   Creatinine 有15個outlier還蠻明顯的，或許能直接drop掉
+
+```{r, warning = F}
+specimen_new %>% filter(str_detect(specimen, 'creatinine')) %>%
+  ggplot() + aes(y=CONFIRMRESULT) + 
+  geom_histogram(stat = 'count',
+                 col="chocolate2",
+                 fill="green", alpha = .2) +
+  ylim(0, 10) +
+  labs(title = 'distribution of Creatinine values', 
+                     subtitle = 'unit: mg/dL') + 
+  theme_bw()
+
+specimen_new %>% filter(str_detect(specimen, 'HbA1c')) %>%
+  ggplot() + aes(y=CONFIRMRESULT) + 
+  geom_histogram(stat = 'count',
+                 col="chocolate2",
+                 fill="green", alpha = .2) +
+  labs(title = 'distribution of HbA1c values', 
+                     subtitle = 'unit: %') + 
+  theme_bw()
+
+specimen_new %>% 
+  filter(str_detect(specimen, 'creatinine')) %>%
+  filter(CONFIRMRESULT > 4)
+```
+
+# `Havard Study & Paper`, coding books
+
+-   90 days & 30 days are different data set.
+
+-   specimen patients are NMAR, which means they might have better
+    health condition than those who need to do specimen.
+
+```{r}
+load('ckpt.rda')
+
+data = specimen_new %>% 
+  select(-RESULTUNIT, -timediff) %>%
+  spread(specimen, CONFIRMRESULT) %>%
+  full_join(
+  firsttime %>%
+    filter(!(PERSONID2 %in% unique(specimen_new$PERSONID2))),
+  by = c('PERSONID2' = 'PERSONID2', 'event' = 'event')
+  ) 
+rm(firsttime, specimen_new)
+# tt = tt %>%   
+#   mutate(creatinine_90day = ifelse(is.na(creatinine_30day), creatinine_90day, creatinine_30day),
+#          HbA1c_90day = ifelse(is.na(HbA1c_30day), HbA1c_90day, HbA1c_30day))
+  
+## 1.基本資料
+data = data %>% 
+  left_join(
+    vroom(file.choose(), locale= locale(encoding = stringi::stri_enc_get()), progress = T, col_select = c(PERSONID2, ADMINISTRATIVESEXCODE, BIRTHDAY), show_col_types = F),
+    by = 'PERSONID2'
+  ) %>%
+  rename(sex = ADMINISTRATIVESEXCODE, age = BIRTHDAY) %>%
+  mutate(age = as_date(paste0(age, '/01')),
+         sex = ifelse(sex == 'M', 1, 0)) %>%
+  mutate(age = as.numeric(event - age) %/% 365.25)
+
+## 2.菸酒檳榔。CB0為檳榔， DK0為喝酒(% 少)，SMK為吸菸
+# data = data %>%
+#   left_join(
+#     vroom(file.choose(), locale= locale(encoding = 'BIG5'), progress = T, col_select = c(PERSONID2, PHYEXAMCODE, PHYEXAMRESULTVALUE), show_col_types = F),
+#     by = 'PERSONID2'
+#   ) %>% 
+#   rename(answer = PHYEXAMRESULTVALUE) %>%
+#   mutate(answer = ifelse(answer %in% c('是', '有', '已戒'), 1, 0)) %>%
+#   spread(PHYEXAMCODE, answer, fill = 0) %>%
+#   select(-`<NA>`) %>%
+#   mutate(SMK = ifelse(SK0+SKE+SKU+SM0+SQ0 >= 1, 1, 0)) %>%
+#   select(-SK0, -SKE, -SKU, -SM0, -SQ0) 
+
+## 3.obesity would be a risk factor
+data = data %>%
+  left_join(
+    vroom(file.choose(), locale= locale(encoding = 'BIG5'), progress = T, col_select = c(PERSONID2, HEIGHT, WEIGHT), show_col_types = F) %>%
+      drop_na(WEIGHT) %>%
+      distinct(PERSONID2, .keep_all = T),
+    by = 'PERSONID2'
+  ) %>%
+  mutate(bmi = WEIGHT/(HEIGHT/100)^2) %>%
+  mutate(bmi = case_when(
+    bmi < 18.5 ~ '0',
+    bmi >= 18.5 & bmi < 24 ~ '1',
+    bmi >= 24 & bmi < 27~ '2', # 過重
+    bmi >= 27 ~ '3' # 肥胖
+  )) %>% 
+    mutate(WEIGHT = case_when(
+    WEIGHT < 40 ~ '0',
+    WEIGHT >= 40 & WEIGHT < 60 ~ '1',
+    WEIGHT >= 60 & WEIGHT < 80~ '2', 
+    WEIGHT >= 80 ~ '3'  # 很久以前的體重不一定反映現在的真實體重。
+  )) %>%
+    mutate(bmi = ifelse(is.na(bmi), WEIGHT, bmi)) %>%
+    select(-WEIGHT, -HEIGHT)
+
+# 4.門診次數（第一筆處方日前所有的）
+data = data %>%
+  left_join(
+    vroom(file.choose(), locale= locale(encoding = 'BIG5'), progress = T, col_select = c(PERSONID2, COMECLINICDATE), show_col_types = F) %>%
+      mutate(COMECLINICDATE = as_date(COMECLINICDATE)),
+    by = 'PERSONID2'
+  ) %>%
+  mutate(timediff = as.numeric(event - COMECLINICDATE)) %>%
+  filter(timediff >= -1) %>% select(-timediff) %>%
+  group_by(PERSONID2) %>% mutate(num_doc = n()) %>% ungroup() %>%
+  distinct(PERSONID2, .keep_all = T) %>% select(-COMECLINICDATE)
+
+## 7. 煙、酒、檳榔（ignorable）
+# tt = vroom(file.choose(), locale= locale(encoding = 'BIG5'), progress = T, col_select = c(PERSONID2, FIELDCODE, FIELDVALUE), show_col_types = F) %>%
+#   filter(PERSONID2 %in% data$PERSONID2) %>%
+#   filter(FIELDCODE %in% c('Smoking', 'DrinkAlcoholic', 'EatingBetelNut', 'SmokingAmount', 'SmokingYear'))
+# data = data %>% 
+#   left_join(tt ,by = 'PERSONID2') %>% 
+#   group_by(PERSONID2, FIELDCODE) %>% mutate(index = row_number()) %>% ungroup() %>%
+#   filter(index == 1) %>% select(-index) %>%
+#   spread(FIELDCODE, FIELDVALUE, fill = 0) %>% 
+#   mutate(DrinkAlcoholic = ifelse(DrinkAlcoholic == 'Y', 1, 0),
+#          EatingBetelNut = ifelse(EatingBetelNut == 'Y', 1, 0), 
+#          Smoking = ifelse(Smoking == 'Y', 1, 0)) %>%
+#   mutate_at(c('SmokingAmount', 'SmokingYear'), as.numeric) %>% select(-`<NA>`)
+# rm(tt)
+
+# 8. 臨床診斷(第一筆處方前)：共病數、種類
+tt = data %>%
+  left_join(
+    vroom(file.choose(), locale= locale(encoding = stringi::stri_enc_get()), progress = T, col_select = c(PERSONID2, DIAGNOSISCODE, CREATEDATETIME), show_col_types = F) ,
+    by = 'PERSONID2'
+  ) %>%  
+  mutate(CREATEDATETIME = as_date(str_extract(CREATEDATETIME, '\\d+\\/\\d+\\/\\d+'))) %>%
+  mutate(timediff = as.numeric(event - CREATEDATETIME)) %>%
+  filter(timediff >= -1 & timediff <= 180) %>% select(-timediff, -CREATEDATETIME) %>% # 0923 改
+  mutate(DIAGNOSISCODE = substr(DIAGNOSISCODE, 1, 3)) %>%
+  
+  mutate(disorder = case_when(
+    str_detect(DIAGNOSISCODE, 'I10') | str_detect(DIAGNOSISCODE, '401') ~ 'hypertension',
+    str_detect(DIAGNOSISCODE, '272') | str_detect(DIAGNOSISCODE, 'E78') ~ 'hyperlipidemia',
+    str_detect(DIAGNOSISCODE, '274') ~ 'gout',
+    DIAGNOSISCODE %in% c(as.character(430:438), paste0('I', 60:66), '285', 'G45') ~ 'cerebrovascular',
+    DIAGNOSISCODE %in% c('571', '794', '070') ~ 'liver(unspecified)',
+    DIAGNOSISCODE %in% c('250', paste0('E', 10:14), 'E16', '251', '249') ~ 'DM',
+    DIAGNOSISCODE %in% c('307', 'F51') ~ 'insomnia',
+    DIAGNOSISCODE %in% c(as.character(140:239), paste0('C', 11:99), paste0('C0', 0:9)) ~ 'cancer',
+    DIAGNOSISCODE %in% c('585', 'N18') ~ 'ckd',
+    
+    DIAGNOSISCODE %in% c('E87') ~ 'acidosis',
+    DIAGNOSISCODE %in% c('414', 'I25', '427', '402', '428', '410','I20', 'I21', 'I22', 'V45', '411', '413', '440', '441', '444', paste0('I', 70:79), 'Z95', 'I50', 'I48') ~ 'heart(unspecified)',
+    str_detect(DIAGNOSISCODE, '300') ~ 'anxiety',
+    str_detect(DIAGNOSISCODE, '599') ~ 'UTI',
+    str_detect(DIAGNOSISCODE, '278') ~ 'obesity',
+    str_detect(DIAGNOSISCODE, '240') ~ 'Goiter',
+    DIAGNOSISCODE %in% c('307', '794') ~ 'not specified',
+    DIAGNOSISCODE %in% c('790') ~ 'blood',
+    #DIAGNOSISCODE %in% c('239') ~ 'Neoplasms',
+    DIAGNOSISCODE %in% c('593', 'Z49', 'V56', '583', 'N08') ~ 'kidney',
+    #DIAGNOSISCODE %in% c('593') ~ 'stroke',
+    T ~ 'other complication'
+  ))  %>% filter(disorder != 'DM') %>% # disorder != 'other complication'
+  group_by(PERSONID2, DIAGNOSISCODE) %>% mutate(ind = row_number()) %>% ungroup() %>% filter(ind == 1) %>% select(-ind) %>%
+  select(-DIAGNOSISCODE) %>%
+  group_by(PERSONID2) %>%
+  mutate(comorbidity= n()) %>% ungroup()
+
+data = data %>% left_join(
+  tt %>% 
+    select(PERSONID2, comorbidity) %>%
+    distinct(PERSONID2, .keep_all = T),
+  by= 'PERSONID2'
+) %>%
+  mutate_at('comorbidity', ~replace(., is.na(.), 0)) %>%
+  left_join(
+  tt %>% 
+    filter(disorder != 'other complication') %>% 
+    group_by(PERSONID2, disorder) %>% mutate(ind = row_number()) %>% ungroup() %>% filter(ind == 1) %>% select(-ind) %>%
+    mutate(dummy = 1) %>%
+    spread(disorder, dummy, fill = 0) %>%
+    select(-event, -creatinine_30day, -creatinine_90day, -HbA1c_30day, -HbA1c_90day, -sex, -age, -SMK, -bmi, -SmokingYear, -num_doc, -comorbidity),
+  by= 'PERSONID2'
+) %>% mutate_at(c('acidosis', 'anxiety', 'cancer', 'cerebrovascular', 'ckd', 'Goiter', 'gout', 'heart(unspecified)', 'hyperlipidemia', 'hypertension', 'insomnia', 'liver(unspecified)', 'obesity', 'UTI', 'blood', 'kidney'), ~replace(., is.na(.), 0))
+rm(tt)
+
+
+save(data, file = 'ckpt.rda')
+```
+
+in 8., stroke is classified as `cerebrovascular` disease.
+
+-   有共病(含
+    other)的患者佔6899位；主要共病(不含other)的診斷記錄有6565位
+
+-   ICD code取前三碼就好，不然高血壓的患者只有300人...
+
+### 主要共病（ICD-10-CM）
+
+門診診斷2616k。保留三高為主，其次心血管、代謝病，行有餘力再試試看liver等其他病。
+
+稀有疾病不代表不顯著
+
+**var**: num_doc, comorbidities\*n
+
+**因果關係**要小心推論！（關聯性建構在`病理學`的基礎上）
+
+-   可能的解釋：health behavior
+
+-   外推性？
+
+| disease                                  | disease code | incidence |
+|:-----------------------------------------|:------------:|:----------|
+| DM                                       |    250.00    | 372414    |
+| hypertension                             |    401.9     | 242490    |
+| hyperlipidemia                           |    272.4     | 209072    |
+| DM                                       |    E11.9     | 86054     |
+| coronary atherosclerotic heart disease   |    414.00    | 71827     |
+| hypertension                             |     I10      | 52257     |
+| 失眠                                     |    307.41    | 50770     |
+| Hyperlipidemia                           |    E78.5     | 49158     |
+| BPH                                      |    600.0     | 28157     |
+| Gout                                     |    274.9     | 25653     |
+| Osteoarthrosis                           |    715.90    | 25087     |
+| Constipation                             |    564.0     | 22837     |
+| Gastritis                                |    535.50    | 22238     |
+| coronary atherosclerotic heart disease   |    I25.10    | ignored   |
+| respiratory infection                    |    465.9     | ignored   |
+| cerebrovascular                          |    437.9     | ignored   |
+| Other chronic nonalcoholic liver disease |    571.8     | ignored   |
+| stomach                                  |    536.9     | ignored   |
+| cerebrovascular                          |     436      | ignored   |
+| ischemic heart                           |    414.9     | ignored   |
+| AFib                                     |    427.31    | ignored   |
+| Gastroesophageal reflux                  |    530.81    | ignored   |
+| Hypertensive heart                       |    402.90    | ignored   |
+| cataract                                 |    366.9     | ignored   |
+| 失眠                                     |    F51.01    | ignored   |
+| heart failure                            |    428.0     | ignored   |
+| liver                                    |    794.8     | ignored   |
+| hepatitis                                |    571.40    | ignored   |
+| abnormal blood chemistry                 |    790.6     | ignored   |
+| conjunctivitis                           |    372.10    | ignored   |
+
+-   另外榜上有名的共病包含`hyperuricemia`, `obesity`, `Anemia`, `ASHD`
+
+### 主要共藥 ATC
+
+-   num_prescription, dm_grugs, dummy of drugs\*n
+
+-   `other` is `A10BX`
+
+```{r}
+load('ckpt.rda')
+load('specimen.rda')
+rm(firsttime, specimen_new, diagnosed_patient)
+#load('tt.rda') # temp file(bind_row)
+## 12. 門診處方12_14, 15_17
+tt = data %>%
+   left_join(
+     vroom(file.choose(), locale= locale(encoding = stringi::stri_enc_get()), progress = T, col_select = c(PERSONID2, DRUGCODE, CREATEDATETIME), show_col_types = F) ,
+     by = 'PERSONID2'
+   ) %>% 
+   mutate(CREATEDATETIME = as_date(str_extract(CREATEDATETIME, pattern = '\\d+\\/\\d+\\/\\d+'))) %>%
+   mutate(timediff = as.numeric(event - CREATEDATETIME)) %>%
+   filter(timediff >= -1 & timediff <= 180) %>% select(-timediff, -CREATEDATETIME)
+# tt %>% count(DRUGCODE) %>% arrange(desc(n)) %>% slice(1:50) 
+tt = tt %>% left_join(drugcode, by = c('DRUGCODE' = 'ntu_code')) %>%
+  select(PERSONID2, sort) %>%
+  group_by(PERSONID2) %>% mutate(num_prescription = n()) %>% ungroup() %>% drop_na(sort)
+rm(drugcode)
+
+data = data %>% left_join(
+  tt %>% 
+    select(PERSONID2, num_prescription) %>%
+    distinct(PERSONID2, .keep_all = T),
+  by= 'PERSONID2'
+) %>%
+  mutate_at('num_prescription', ~replace(., is.na(.), 0)) %>%
+  left_join(
+  tt %>% 
+    # filter(sort != 'other') %>% 
+    group_by(PERSONID2, sort) %>% mutate(ind = row_number()) %>% ungroup() %>% filter(ind == 1) %>% select(-ind) %>%
+    mutate(dummy = 1) %>%
+    spread(sort, dummy, fill = 0) %>%
+    select(-num_prescription),
+  by = 'PERSONID2') %>%
+  # mutate_at(c('Biguanides', 'DPP-4', 'Insulins', 'SGLT2', 'Sulfonylureas'), ~replace(., is.na(.), 0)) %>%
+  mutate(num_dm_drugs = Biguanides + `DPP-4` + Insulins + SGLT2 + Sulfonylureas)
+
+rm(tt)
+
+save(data, file = 'ckpt.rda')
+```
+
+<https://www.whocc.no/atc_ddd_index/?code=A10&showdescription=no>
+
+Antihypertensive drug
+
+ACE inhibitor
+
+ARB
+
+β-blocker
+
+Loop diuretic
+
+Thiazide diuretic
+
+Aldosterone antagonist
+
+Statin
+
+#### 繪圖！ the dist of co-medication
+
+```{r, warning=F}
+# 每種的直方
+data %>% select(31:52) %>%
+  summarise(across(everything(), ~ sum(.x))) %>%
+  gather('drug', 'count', 1:22) %>%
+  filter(drug %in% c('Biguanides', 'DPP-4', 'Insulins', 'SGLT2', 'Sulfonylureas')) %>%
+  ggplot(aes(x=drug, y=count, color=drug)) +
+  geom_bar(stat="identity", fill="white") +
+  labs(title = '糖尿病人第一筆SGLT2/DPP-4i 前180天之處方情形',
+       subtitle = '病人共7020位') + theme_bw()
+data %>% select(33:51) %>%
+  summarise(across(everything(), ~ sum(.x))) %>%
+  gather('drug', 'count', 1:19) %>%
+  filter(!(drug %in% c('Biguanides', 'DPP-4', 'Insulins', 'SGLT2', 'Sulfonylureas'))) %>%
+  ggplot(aes(x="", y=count, fill=drug)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  theme_void() + 
+  theme(legend.position="none") +
+  geom_text(aes(x = 1.6, y= count,label = drug), color = "black", size=3, position = position_stack(vjust = .5)) +
+  labs(title = '共藥的比例',
+       subtitle = '其中stain約3611筆病人有開')
+
+# diag vs non diag
+library(viridis)
+library(hrbrthemes)
+data %>% select(33:51) %>%
+  summarise(across(everything(), ~ sum(.x))) %>%
+  gather('drug', 'count', 1:19) %>%
+  mutate(sort = ifelse(drug %in% c('Biguanides', 'DPP-4', 'Insulins', 'SGLT2', 'Sulfonylureas'), 'DM', 'co- medicine')) %>%
+  ggplot(aes(fill=drug, y=count, x=sort)) + 
+    geom_bar(position="stack", stat="identity") +
+    scale_fill_viridis(discrete = T) +
+    ggtitle("不同類型處方的數目比較") +
+    theme_ipsum() +
+    xlab("")
+
+# 共病 圓餅圖
+library(RColorBrewer)
+colourCount = 16
+getPalette = colorRampPalette(brewer.pal(9, "Set1"))
+data %>% select(17:32) %>%
+  summarise(across(everything(), ~ sum(., is.na(.), 0))) %>%
+  gather("co_disease", "n", 1:16) %>%
+  mutate_at("co_disease", as.factor) %>% 
+  mutate(fraction = n/sum(n),
+         ymax = cumsum(fraction),
+         ymin = c(0, head(ymax, n=-1))) %>%
+  ggplot() + 
+  aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, fill=co_disease) +
+  geom_rect() + 
+  # scale_fill_brewer(palette=4) +
+  scale_fill_manual(values = getPalette(colourCount)) + 
+  coord_polar(theta="y") + xlim(c(2, 4)) + 
+  labs(title = "共病分布狀況", 
+       subtitle = "樣本數7020") +
+  theme_bw() + 
+  theme(legend.position="bottom") +
+  guides(fill=guide_legend(nrow=2))
+
+## 看診次數盒子圖 & 血糖值
+data  %>%
+  mutate(Age = age) %>% ## remove
+  mutate(age = case_when(
+    Age <= 20 ~ "10-20",
+    Age <= 30 & Age > 20 ~ "20-30",
+    Age <= 40 & Age > 30 ~ "30-40",
+    Age <= 50 & Age > 40 ~ "40-50",
+    Age <= 60 & Age > 50 ~ "50-60",
+    Age <= 70 & Age > 60 ~ "60-70",
+    Age <= 80 & Age > 70 ~ "70-80",
+    Age <= 100 & Age > 80 ~ "80_above",
+    T ~ "na"
+  )) %>%
+  ggplot(aes(x=age, y=HbA1c_90day, fill=age)) + 
+  geom_boxplot(alpha=0.3) +
+  theme(legend.position="none") +
+  scale_fill_brewer(palette="BuPu") + 
+  theme_bw() + 
+  labs(title = "Dist of Hb1Ac level by age groups", 
+       subtitle = "given that data is MAR in age groups.",
+       x = "age groups")
+data  %>%
+  mutate(Age = age) %>% ## remove
+  mutate(age = case_when(
+    Age <= 20 ~ "10-20",
+    Age <= 30 & Age > 20 ~ "20-30",
+    Age <= 40 & Age > 30 ~ "30-40",
+    Age <= 50 & Age > 40 ~ "40-50",
+    Age <= 60 & Age > 50 ~ "50-60",
+    Age <= 70 & Age > 60 ~ "60-70",
+    Age <= 80 & Age > 70 ~ "70-80",
+    Age <= 100 & Age > 80 ~ "80_above",
+    T ~ "na"
+  )) %>%
+  ggplot(aes(x=age, y=num_doc, fill=age)) + 
+  geom_boxplot(alpha=0.3) +
+  theme(legend.position="none") +
+  scale_fill_brewer(palette="BuPu") + 
+  theme_bw() + 
+  labs(title = "Number of doctor visits by age groups", 
+       subtitle = "given that data is MAR in age groups.",
+       x = "age groups")
+library(cowplot)
+plot_grid(p1, p2, labels = "AUTO", nrow = 2)
+```
+
+### 採檢次數 (within 180)
+
+-   採檢次數（不管幾種都好）
+
+```{r}
+load('ckpt.rda')
+# 檢驗報告(新 13年後)_1 & 2
+tt = vroom(file.choose(), locale= locale(encoding = 'big-5'), progress = T, col_select = c(PERSONID2, ORIGINALLABORDERFULLNAME, CREATEDATETIME), show_col_types = F) %>%
+  filter(PERSONID2 %in% data$PERSONID2) %>%
+  mutate(CREATEDATETIME = as_date(str_extract(CREATEDATETIME, pattern = '\\d+\\/\\d+\\/\\d+'))) %>%
+  drop_na(CREATEDATETIME) %>%
+  left_join(data %>% select(PERSONID2, event), by = 'PERSONID2') %>%
+  select(-ORIGINALLABORDERFULLNAME) %>%
+  mutate(timediff = as.numeric(event-CREATEDATETIME)) %>%
+  filter(timediff <= 180 & timediff >= -1) %>%
+  select(-timediff, -CREATEDATETIME) %>%
+  group_by(PERSONID2) %>% mutate(num_specimen = n()) %>%
+  ungroup() %>% distinct(PERSONID2, .keep_all = T)
+
+data = data %>% left_join(
+  tt %>% select(-event), 
+  by = 'PERSONID2'
+) %>%
+  mutate_at('num_specimen', ~replace(., is.na(.), 0)) 
+  
+save(data, file = 'ckpt.rda')
+```
