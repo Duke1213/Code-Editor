@@ -1,0 +1,339 @@
+---
+title: "Significant Variables and Target User"
+author: "Duke Liu"
+date: "2022/5/18"
+output:
+  prettydoc::html_pretty:
+    theme: Architect
+    highlight: github
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, eval = T, warning =F, message = F)
+```
+
+## Utilities
+
+```{r, echo=T}
+library(glmnet);library(biglasso)
+library(ANN2);
+library(tidyverse); library(corrplot); library(car); library(vtable)
+# library(stringr); library(vroom)
+library(lubridate)
+library(showtext)
+showtext_auto()
+```
+
+### Clean Data
+
+```{r, echo=T}
+for(f in c('f_1.rds', 'Lobby.rds', 'livecam.rds', 'operation.rds')){load(f)}
+temp = livecam$user_id
+livecam = livecam %>%
+  mutate_if(is.character,as.numeric) %>%
+  mutate(user_id = temp) %>%
+  replace(is.na(.), 0)
+temp = file_0$user_id
+file_0 = file_0 %>%
+  mutate_if(is.character,as.numeric) %>%
+  mutate(user_id = temp)%>%
+  replace(is.na(.), 0)
+temp = Lobby$user_id
+Lobby = Lobby %>%
+  mutate_if(is.character,as.numeric) %>%
+  mutate(user_id = temp)%>%
+  replace(is.na(.), 0)
+temp = Operation$user_id
+Operation = Operation %>%
+  mutate_if(is.character,as.numeric) %>%
+  mutate(user_id = temp)%>%
+  replace(is.na(.), 0)
+file_0 = file_0 %>%
+  inner_join(livecam %>% select(-d7_ac), by = 'user_id') %>%
+  inner_join(Operation %>% select(-d7_ac), by = 'user_id') %>%
+  inner_join(Lobby %>% select(-d7_ac), by = 'user_id') 
+print('done')
+rm(list=setdiff(ls(), "file_0"))
+
+file = tibble(user_id = file_0$user_id)
+for(col in names){
+  file = file %>%
+    bind_cols(file_0[, col])
+}
+st(file, out = "csv", file = 'st.csv')
+```
+
+```{r}
+tibble(source = rep(c("Livecam", "Lobby","Operation"), 3), 
+       label =  c("a", "a", "a", "b", "b", "b", "c", "c", "c"), 
+       value = c(73143, 41193, 78776, 22393, 36355, 104289, 14749, 33156, 54805)) %>%
+  ggplot() + aes(source, value, fill= label) +
+  geom_bar(stat = 'identity', position = 'stack') +
+  scale_fill_brewer(palette = 4) + theme_bw() + 
+  labs(title = "熱門使用功能與行為", 
+       y = "行為總次數")
+```
+
+
+```{r}
+Operation %>%
+  #select(contains('click')) %>%
+  select(!contains('d1'))
+
+tibble(func = c('liveCam', 'Lobby', 'Operation'), 
+       value = c(18, 17, 41)) %>%
+  mutate_at("func", as.factor) %>% # count(typo_ad) %>%
+  mutate(fraction = value/sum(value),
+         ymax = cumsum(fraction),
+         ymin = c(0, head(ymax, n=-1)),
+         labelPosition = (ymax + ymin) / 2, 
+         label = paste0(func, "\n value: ", value)) %>%
+  ggplot() + aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, fill=func) +
+  geom_rect() +
+  geom_label( x=3.5, aes(y=labelPosition, label=label), size=6) +
+  scale_fill_brewer(palette=3) +
+  coord_polar(theta="y") +
+  xlim(c(2, 4)) +
+  theme_void() +
+  theme(legend.position = "none") +
+  labs(title = '不同來源的行為變數 第一天的平均使用次數')
+
+Operation %>%
+  select(!contains('d1')) %>%
+  select(-d7_ac) %>%
+  gather('key', 'value', 2:52) %>%
+  mutate(value = sum(value)) %>% distinct(user_id, .keep_all = T) %>%
+  mutate(value = round(value/nrow(.)))
+
+livecam %>%
+  select(!contains('d1')) %>%
+  select(-d7_ac)%>%
+  gather('key', 'value', 2:63) %>%
+  mutate(value = sum(value)) %>% distinct(user_id, .keep_all = T) %>%
+  mutate(value = round(value/nrow(.)))
+
+Lobby %>%
+  select(contains('user')|contains('click')) %>%
+  select(!contains('d1')) %>%
+  gather('key', 'value', 2:61) %>%
+  mutate(value = sum(value)) %>% distinct(user_id, .keep_all = T) %>%
+  mutate(value = round(value/nrow(.)))
+  
+livecam %>%
+  select_if(is.numeric) %>%
+  map_dbl(sum)
+```
+
+
+## Lasso
+
+
+### Regularization 常規化（變數篩選）
+
+`說明1`：提高估計變數的bias，換來的是更小的variance、且能將經濟不顯著的變項提出模型，達成**變數選擇**的效果。
+
+詳細內容(BIC, lambda那些)，此處忽略。
+
+`說明2`：接下來的模型, 挑出顯著的變項。
+
+`缺陷`：在提高預測準確度後，參數估計會被高估或低估，且該參數無法做統計檢定。
+
+#### 模型
+
+
+##### 參數的常規化（收斂過程）
+
+強制將大部分變數往0的方向移動，使得經濟不顯著的變數被壓縮為0。
+```{r}
+# library(biglasso)
+set.seed(1213); index = sample(nrow(file_0), 0.7*nrow(file_0))
+train = file_0[index, ]; validation = file_0[-index, ]
+y <- train$d7_ac
+X.bm = as.big.matrix(as.matrix(train %>%
+                                 select(-user_id, -d7_ac)))
+validation_y = validation$d7_ac
+validation_X = as.big.matrix(as.matrix(validation %>%
+                                 select(-user_id, -d7_ac)))
+fit <- biglasso(X.bm, y)
+plot(fit)
+```
+
+##### 10 fold cv
+```{r}
+cvfit <- tryCatch(
+         {
+                cv.biglasso(X.bm, y, seed = 1234, nfolds = 10, ncores = 4)
+         },
+         error = function(cond) {
+                cv.biglasso(X.bm, y, seed = 1234, nfolds = 10, ncores = 2)
+         }
+)
+par(mfrow = c(2, 2), mar = c(3.5, 3.5, 3, 1) ,mgp = c(2.5, 0.5, 0))
+plot(cvfit, type = "all")
+```
+
+##### 可以看到lambda的最佳值
+```{r}
+summary(cvfit)
+```
+
+##### 顯著不為零的變數們
+
+```{r}
+coef(cvfit)[which(coef(cvfit) != 0),] 
+x = ''
+for(i in names(variables)){
+  x = paste0(x, i,' + ')
+}
+model = paste0('d7_ac ~ ', substr(x, 14, 1123))
+
+logistic = glm(model, data = file_0, family = 'binomial')
+summary(logistic)
+
+tb %>%
+  mutate(coef_ = exp(coef), 
+         type_2 = ifelse(coef_ >= 1, '1', '0')) %>%
+  # filter(var != 'sum_sub_ads_d7') %>%
+  ggplot(aes(x=var, y=coef, fill=type_2)) +
+geom_bar(stat="identity", color="black", position=position_dodge())+
+  geom_text(aes(label=var), vjust=1.6, color="blue",
+            position = position_dodge(0.9), size=3.5) +
+  # ylim(0, 5.553425e+01) + 
+  theme_minimal() +
+  scale_fill_manual(values=c('#999999','#E69F00')) +
+  labs(title = "影響留存率的羅吉斯回歸顯著變數", 
+       y = 'Beta')
+```
+
+```{r}
+coef = coef(cvfit)[which(coef(cvfit) != 0),]
+tb <- tibble(type=c(rep("ADs", 26), rep("Functional", 39)),
+                lbl=names(coef),
+                value=coef) %>%
+  filter(!lbl == '(Intercept)') %>%
+  filter(type == "Functional") %>%
+  mutate(type_2 = ifelse(value >=0, "P", "N"))
+
+tb %>% 
+  filter(value >= quantile(value, 0.8) |
+         value <= quantile(value, 0.2)) %>%
+  ggplot(aes(x=lbl, y=value, fill=type_2)) +
+geom_bar(stat="identity", color="black", position=position_dodge())+
+  geom_text(aes(label=lbl), vjust=1.6, color="blue",
+            position = position_dodge(0.9), size=3.5) +
+  theme_minimal() +
+  scale_fill_manual(values=c('#999999','#E69F00')) +
+  labs(title = "影響留存率的重要功能變數")
+```
+
+
+### Lasso 預測第7天是否有留存的準確度。
+
+```{r}
+validation = validation %>%
+  mutate(predicted = as.numeric(predict(cvfit, validation_X)),
+         truth = validation_y) %>% select(predicted, truth) 
+validation %>%
+  mutate_at('truth', as.character) %>%
+  ggplot(aes(x=predicted, fill=truth)) + geom_density(alpha=.3)+ # //
+  labs(title = "預測目標為 active_user, 觀察lasso的預測效果。") +
+  theme_bw()
+  
+loss = pROC::auc(validation$truth, validation$predicted)
+threshold= mean(validation$predicted, na.rm = T)
+predicted_values = ifelse(validation$predicted >= threshold, 1, 0)
+conf_matrix<-table(predicted_values,validation$truth)
+cat("AUC：", loss)
+cat("敏感度：", round(caret::sensitivity(conf_matrix), 2))
+cat("特異度", round(caret::specificity(conf_matrix), 2))
+
+conf_matrix %>%
+  data.frame() %>% 
+  mutate(predicted_values = ifelse(predicted_values == 1, "good", "bad")) %>%
+  mutate(predicted_values = factor(predicted_values, levels = c("good", "bad"))) %>%
+  group_by(Var2) %>% 
+  mutate(total = sum(Freq)) %>% 
+  ungroup() %>% 
+  ggplot(aes(Var2, predicted_values, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), size = 8) +
+  scale_fill_gradient(low = "peachpuff2", high = "navajowhite") +
+  scale_x_discrete(position = "top") +
+  geom_tile(color = "black", fill = "black", alpha = 0) +
+  theme_bw()
+```
+
+
+
+### Note.
+
+- 未加二手變數;且資料的變項分成四等分，不知道有沒有影響。
+
+- 未將`stay_time/ session次數`作為加權
+
+## Tree
+
+```{r}
+library(tree)
+library(rpart)
+library(ISLR)
+df = livecam %>% select(-user_id)
+df$d7_ac = as.factor(df$d7_ac)
+for(col in names(df %>% select(-d7_ac))){
+  if(df %>% select(col) %>% map_dbl(sum) == 0){
+    df = df %>% select(-col)
+  }
+}
+tree = rpart(d7_ac~., method = 'class', data = df)
+printcp(tree)
+plotcp(tree)
+summary(tree) 
+plot(tree,  type = "proportional") 
+text(tree,pretty=0)
+tree.
+```
+
+
+## DNN: 挑選 Target User
+
+- `假設`：大部分使用者的行為是`隨機、不可預測的`，因此我們之前的模型都會產生變異數大的估計，使得結果不穩定。
+
+- `解決方法`：用類神經網路的模型，將預測d7_active的機率最高及最低各10%的樣本抓下來，將這些人定義為行為明確的使用者，當作後續分析合格的樣本。
+
+- `預期成效`： 由於這群樣本的行為和結果是有關係的(而不是隨機)，模型的預測效果會提高很多！
+
+#### 結果：僅0.5%的樣本的預測機率介於0.05和0.95間。
+
+## 用新變項和新資料跑羅吉斯
+
+```{r, eval = F}
+d1 = d1[!d1 %in% c("(Intercept)")]
+d2 = d2[!d2 %in% c("(Intercept)")]
+d3 = d3[!d3 %in% c("(Intercept)")]
+d4 = d4[!d4 %in% c("(Intercept)")]
+
+dat = file_0[,c(d1, "d7_ac", "user_id")] %>%
+  inner_join(livecam[,c(d3, "user_id")], by = "user_id") %>%
+  inner_join(Operation[,c(d2, "user_id")], by = "user_id") %>%
+  inner_join(Lobby[,c(d4, "user_id")], by = "user_id") 
+  
+rm(list=setdiff(ls(), "dat"))
+dat = dat %>%
+  rename(truth = d7_ac) 
+set.seed(1213)
+index = sample(nrow(dat), 0.7*nrow(dat))
+train = dat[index, ]
+validation = dat[-index, ] 
+X_train <- train %>%
+  select(-truth, -user_id)
+y_train <- train[, "truth"]
+
+
+# (（某功能的次數）/session次數)
+```
+
+
+

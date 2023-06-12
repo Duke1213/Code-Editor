@@ -1,0 +1,509 @@
+---
+title: "Analysis of Perfect Camera App｜Methods"
+author: "Duke Liu"
+date: "2022/3/30"
+output:
+  prettydoc::html_pretty:
+    theme: Architect
+    highlight: github
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, eval = T, warning =F, message = F)
+```
+
+## Utilities
+
+```{r, echo=T}
+library("randomForest");require(e1071);
+library(ANN2);
+library(tidyverse); library(corrplot); library(car); library(vtable)
+# library(stringr); library(vroom)
+library(lubridate)
+library(showtext)
+showtext_auto()
+```
+
+
+```{r, eval = F}
+
+
+dat = read_csv("data/data_v1_0408.csv") %>%
+  group_by(b.user_id, a.session_id) %>%
+  distinct(a.staytime, .keep_all = T) %>% 
+    mutate(a.staytime = ifelse(a.staytime == "NULL", NA, a.staytime)) %>%
+    mutate_at(c("a.staytime"), as.numeric) %>%
+    mutate(a.staytime = ifelse(is.na(a.staytime), mean(a.staytime, na.rm = T), a.staytime)) %>%
+    mutate(f.card_share_to_social = sum(f.card_share_to_social), 
+           f.operation_share_to_social = sum(f.operation_share_to_social), 
+           sum_featureapply = sum(sum_featureapply),
+           sum_d1_n_apply = sum(sum_d1_n_apply),
+           sum_d2_n_apply = sum(sum_d2_n_apply),
+           sum_d3_n_apply = sum(sum_d3_n_apply),
+           sum_d4_n_apply = sum(sum_d4_n_apply),
+           sum_d5_n_apply = sum(sum_d5_n_apply),
+           sum_d6_n_apply = sum(sum_d6_n_apply),
+           sum_d7_n_apply = sum(sum_d7_n_apply),
+           count_user_id = sum(count_user_id),
+           sum_body_shaper_click = sum(sum_body_shaper_click),
+           sum_body_shaper_apply = sum(sum_body_shaper_apply),
+           sum_lip_shaper_click = sum(sum_lip_shaper_click),
+           sum_lip_shaper_apply = sum(sum_lip_shaper_apply),
+           sum_red_eye_click = sum(sum_red_eye_click),
+           sum_red_eye_apply = sum(sum_red_eye_apply),
+           sum_smoother_click = sum(sum_smoother_click),
+           sum_smoother_apply = sum(sum_smoother_apply),
+           sum_face_shaper_click = sum(sum_face_shaper_click),
+           sum_face_shaper_apply = sum(sum_face_shaper_apply),
+           sum_acne_click = sum(sum_acne_click),
+           sum_acne_apply = sum(sum_acne_apply),
+           sum_auto_click = sum(sum_auto_click),
+           sum_auto_apply = sum(sum_auto_apply),
+           sum_removal_click = sum(sum_removal_click),
+           sum_removal_apply = sum(sum_removal_apply)
+           ) %>%
+    ungroup() %>% group_by(b.user_id) %>% distinct(a.session_id, .keep_all = T) %>% ungroup() %>%
+    arrange(b.user_id)
+
+ dat = dat %>% 
+  # mutate(value = 1)  %>% spread(b.country, value,  fill = 0 ) %>%
+  group_by(b.user_id) %>% mutate(session_count = n()) %>%
+  mutate(f.card_share_to_social = sum(f.card_share_to_social), 
+           f.operation_share_to_social = sum(f.operation_share_to_social), 
+           sum_featureapply = sum(sum_featureapply),
+           sum_d1_n_apply = sum(sum_d1_n_apply),
+           sum_d2_n_apply = sum(sum_d2_n_apply),
+           sum_d3_n_apply = sum(sum_d3_n_apply),
+           sum_d4_n_apply = sum(sum_d4_n_apply),
+           sum_d5_n_apply = sum(sum_d5_n_apply),
+           sum_d6_n_apply = sum(sum_d6_n_apply),
+           sum_d7_n_apply = sum(sum_d7_n_apply),
+           count_user_id = sum(count_user_id),
+           sum_body_shaper_click = sum(sum_body_shaper_click),
+           sum_body_shaper_apply = sum(sum_body_shaper_apply),
+           sum_lip_shaper_click = sum(sum_lip_shaper_click),
+           sum_lip_shaper_apply = sum(sum_lip_shaper_apply),
+           sum_red_eye_click = sum(sum_red_eye_click),
+           sum_red_eye_apply = sum(sum_red_eye_apply),
+           sum_smoother_click = sum(sum_smoother_click),
+           sum_smoother_apply = sum(sum_smoother_apply),
+           sum_face_shaper_click = sum(sum_face_shaper_click),
+           sum_face_shaper_apply = sum(sum_face_shaper_apply),
+           sum_acne_click = sum(sum_acne_click),
+           sum_acne_apply = sum(sum_acne_apply),
+           sum_auto_click = sum(sum_auto_click),
+           sum_auto_apply = sum(sum_auto_apply),
+           sum_removal_click = sum(sum_removal_click),
+           sum_removal_apply = sum(sum_removal_apply)
+           ) %>%
+  distinct(b.user_id, .keep_all = T) %>% 
+  ungroup() %>% arrange(b.user_id)
+```
+
+# 1. Problem definition
+
+### Goals: Examines if the **Ads**`i.e. 觸及率` effect on **retention rate** differs in **groups**. 
+
+### What are the **optimized number of ads** on an average user/conditional on a specific users?
+
+### What are the most popular in-app **functions** among active or loyal users?
+
+$$
+retention = \frac{users_{14thday}}{users_{baseline}}
+$$
+
+#### Some`Note`:
+
+- If we want to build a model, it's suggested to found a `binary` response variable indicating the fact of retention. For example, if the user **opens the app at least 3 times a week** after he first downloaded it. The $retention_i = 1$ for that person, otherwise 0.
+
+- `Groups`: nation, premium/ general user, type of ADs; user frequency, use time, gender, 有用某/某些功能第一天超過五天以上.
+
+# 2.  Pre-Modeling.
+
+## Descriptive statistics
+
+- omit missing data
+
+
+```{r}
+st(dat, out = "return")
+```
+
+## Distributions in  groups 
+
+#### users in different countries
+
+```{r}
+dat %>%
+  count(country)%>% arrange(desc(n)) %>%
+  filter(country %in% c("IN", "US", "BR", "LK", "PE", "DE", "MX", "RU", "BD", "TW")) %>%
+  ggplot() + aes(country, n) + geom_bar(stat= "identity",
+                                        fill = "lightblue"
+                                        ) +
+  labs(title= "新的使用者在不同國家的分布",
+       subtile = "使用者前10多的國家。") +
+  theme_classic() 
+
+dat = dat %>%
+  filter(country %in% c("IN", "US", "BR", "LK", "PE", "DE", "MX", "RU", "BD", "TW"))
+```
+
+#### Boxplot
+
+- 從這張圖可以看到前七天廣告曝光數在不同國家的比較，其中`US`, `IN`這兩個國家的廣告力度最強，且有出現顯著的離群值。
+
+- 另外，`MX`投放廣告的中位數及百分級距也是第一名。說明這個國家可能是perfect想拓展市場的目標國。
+
+```{r}
+dat %>% ggplot(aes(x=country, y=all_AD, fill=country)) + 
+  geom_boxplot(alpha=0.3) +
+  theme(legend.position="none") +
+  scale_fill_brewer(palette="BuPu") + 
+  theme_bw() + 
+  labs(title = "Boxplot of all_AD by countries", 
+       x = "countris")
+  # dat %>% ggplot(aes(x=os, y=all_AD, fill=os)) + 
+  # geom_boxplot(alpha=0.3) +
+  # theme(legend.position="none") +
+  # scale_fill_brewer(palette="BuPu") + 
+  # theme_bw() + 
+  # labs(title = "Boxplot of all_AD by os", 
+  #      x = "os")
+```
+
+
+#### group bar chart
+
+- 或許可做做看`apply`的，只不過我不確定null和0是不是同一類～
+
+```{r}
+dat %>% 
+  group_by(country) %>% 
+  summarise(across(c("d1_ADs","d2_ADs","d3_ADs","d4_ADs","d5_ADs","d6_ADs","d7_ADs"), mean)) %>%
+  gather("date_n_ADs", "n", 2:8) %>%
+  mutate_at(c("country", "date_n_ADs"), as.factor) %>% 
+  ggplot(aes(fill=date_n_ADs, y=n, x=country)) + 
+    geom_bar(position="dodge", stat="identity") +
+  labs(title = "不同國家中，前七天廣告曝光的分布情況", 
+       x = '不同國家組', y = "平均廣告數") +
+  scale_fill_manual(values = sample(colors(), 7)) +
+  theme_bw() +
+  coord_flip()
+```
+
+#### pie charts
+
+ref [donut chart]<https://r-charts.com/part-whole/donut-chart/>
+
+```{r}
+dat %>% 
+  mutate(recovery = all_AD - interstitial - apply) %>%
+  # group_by(country) %>% 
+  summarise(across(c("recovery","interstitial","apply"), mean)) %>%
+  rename(other = recovery) %>%
+  gather("typo_ad", "n", 1:3) %>%
+  # filter(number > 0 ) %>%
+  mutate_at("typo_ad", as.factor) %>% # count(typo_ad) %>%
+  mutate(fraction = n/sum(n),
+         ymax = cumsum(fraction),
+         ymin = c(0, head(ymax, n=-1))) %>%
+  ggplot() + 
+  aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, fill=typo_ad) +
+  geom_rect() + 
+  scale_fill_brewer(palette=4) + 
+  coord_polar(theta="y") + xlim(c(2, 4)) + 
+  labs(title = "不同類型廣告在前七天的平均曝光次數比較", 
+       subtitle = "全世界。其中interstitial = 188") +
+  theme_bw()
+```
+
+#### group line charts
+
+x: 廣告曝光數；y：留存率 & 轉換率的 trade-off
+
+```{r}
+# 不同國家7天內的曝光次數
+library(hrbrthemes); library(viridis);
+dat %>% 
+  group_by(country) %>% 
+  summarise(across(c("d1_ADs","d2_ADs","d3_ADs","d4_ADs","d5_ADs","d6_ADs","d7_ADs"), mean)) %>%
+  gather("date_n_ADs", "n", 2:8) %>%
+  mutate_at(c("country", "date_n_ADs"), as.factor) %>%
+  ggplot( aes(x=date_n_ADs, y=n, group=country, color=country)) +
+    geom_line() +
+    scale_color_viridis(discrete = TRUE) +
+    ggtitle("不同國家7天內的曝光次數比較圖") +
+    theme_ipsum() +
+    ylab("Number of average ADs")
+```
+
+#### 雙y軸圖（目前資料不夠）
+
+- `idea`： x 軸是廣告；y分別是留存率和廣告收益的線。
+
+reference：<https://ithelp.ithome.com.tw/articles/10232761>
+
+```{r, eval = F}
+
+```
+
+
+
+#### correlation among dependent variables
+
+- 我們先把有無applied當成active users
+
+- 這張圖只是初步觀察廣告書和留存率的關聯性，並不能說明因果關係。`顏色越深，相關性越大。`
+
+解釋變數多 && 會用到regression的話，可能會用到這塊。
+
+```{r}
+corrplot(
+ cor(dat %>%
+ select(-user_id, -os, -country, -day, -recovery) %>%
+ mutate_all(as.numeric) %>%drop_na()) ,
+ type = "upper")
+```
+
+
+
+## Statistic tests
+
+#### equal variance tests
+
+To see if there is a heterskadasticity in groups
+
+`Levene’s test` is applied to test Homogenious variance btw multiple groups even when the data is not normally distributed.
+
+```{r, eval =F, echo =T}
+
+leveneTest(d7_apply ~ country, data = dat) 
+```
+
+
+#### t test + anova test| `卡方檢定`
+
+##### 這邊是檢驗前面看到的相關性，有沒有統計上的證據顯示廣告～留存率是有關的。
+
+目前缺留存率的資料，暫時跳過。（程式碼如下）。
+
+```{r, eval = F, echo = T}
+t.test(dat %>% filter(diabetes == "1") %>% pull(glucose), 
+       dat %>% filter(diabetes == "0") %>% pull(glucose),
+       var.equal = F)
+
+
+```
+
+
+# 3.  Modeling
+
+`dummy variable` and `interaction terms`
+
+### Base model for inference
+
+- Day $i$ 有上線的`dummy variable`？
+
+- 反應變數的分布圖？
+
+- cross validation?
+
+```{r}
+dat = read_csv("data/data_v1_0413.csv") %>%
+  rename(truth = d7_active) %>%
+  drop_na()
+t1 = dat %>% filter(truth == 1); t2 = dat %>% filter(truth == 0); set.seed(1213); index = sample(nrow(t2), nrow(t1))
+dat = t2[index, ] %>% bind_rows(t1) 
+
+# spread one-hot vector
+
+dat["times"] -> weight
+dat = dat %>%
+  select(-user_id, -os, -country, -day, -times)
+for(col in names(dat)){
+  dat[col] = dat[col] / weight
+}
+rm(weight)
+
+set.seed(1213); index = sample(nrow(dat), 0.7*nrow(dat))
+train = dat[index, ]
+validation = dat[-index, ]
+
+md = truth ~ . 
+model_0 = glm(md, train, family = "binomial")
+
+validation$predicted = predict(model_0, validation)
+# eva
+loss = pROC::auc(validation$truth, validation$predicted)
+threshold= mean(validation$predicted, na.rm = T)
+predicted_values = ifelse(validation$predicted >= threshold, 1, 0)
+conf_matrix<-table(predicted_values,validation$truth)
+cat("AUC：", loss)
+cat("敏感度：", round(caret::sensitivity(conf_matrix), 2))
+cat("特異度", round(caret::specificity(conf_matrix), 2))
+# regclass::VIF(model_0) # 發現多重共線性
+
+rm(md, predicted_values, t1, t2, loss, col, index, threshold)
+# summary(model_0)
+
+```
+
+#### 發現雖然預測效果好，變數卻沒有解釋能力，很難有甚麼結論。
+
+```{r}
+summary(model_0)
+```
+
+```{r}
+conf_matrix %>%
+  data.frame() %>% 
+  mutate(predicted_values = ifelse(predicted_values == 1, "good", "bad")) %>%
+  mutate(predicted_values = factor(predicted_values, levels = c("good", "bad"))) %>%
+  group_by(Var2) %>% 
+  mutate(total = sum(Freq)) %>% 
+  ungroup() %>% 
+  ggplot(aes(Var2, predicted_values, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), size = 8) +
+  scale_fill_gradient(low = "#ea4434", high = "#badb33") +
+  scale_x_discrete(position = "top") +
+  geom_tile(color = "black", fill = "black", alpha = 0) +
+  theme_bw()
+  
+
+validation %>%
+  mutate_at('truth', as.character) %>%
+  ggplot(aes(x=predicted, fill=truth)) + geom_density(alpha=.3)+ # //
+  labs(title = "預測目標為 active_user, 觀察logistic的預測效果。", 
+       subtitle = '1. take mean predicted value as threshold｜2. all the independent variables are included.')
+```
+
+
+
+
+
+### stepwise
+
+<https://reurl.cc/7eO3Md>
+```{r, eval=F}
+model_0_stepwise = model_0 %>% MASS::stepAIC(trace = FALSE)
+```
+
+### RF
+
+### SVM
+
+### 類神經網路
+
+- neuron network 的weight？
+
+- CV
+
+```{r}
+set.seed(1213)
+index = sample(nrow(dat), 0.7*nrow(dat))
+train = dat[index, ]
+validation = dat[-index, ] 
+X_train <- train %>%
+  select(-truth)
+y_train <- train[, "truth"]
+
+NN <- neuralnetwork(X = X_train, y = y_train, hidden.layers = c(6, 3), optim.type = 'adam', learn.rates = 0.001, activ.functions = 'relu', sgd.momentum = 0.9, L1 = 1, n.epochs = 100, batch.size = 64, val.prop = 0.1)
+plot(NN)
+validation$predicted <- predict(NN, newdata = (validation %>% select(-truth)))$probabilities[, 'class_1']
+# eva
+loss = pROC::auc(validation$truth, validation$predicted)
+threshold= mean(validation$predicted, na.rm = T)
+predicted_values = ifelse(validation$predicted >= threshold, 1, 0)
+conf_matrix<-table(predicted_values,validation$truth)
+cat("AUC：", loss)
+cat("敏感度：", round(caret::sensitivity(conf_matrix), 2))
+cat("特異度", round(caret::specificity(conf_matrix), 2))
+
+
+
+rm(NN, X_train, y_train, index, predicted_values, threshold, loss)
+```
+
+
+# 0513 紀錄
+
+```{r}
+load("user.rds")
+files = list.files(path = "data/0513_dat/first_and_total_Oparation")
+# files = files[files %>% str_detect("csv")]
+# files = files[!files %in% files[1]]
+d7_user = read_csv("data/0513_dat/active day only.csv") %>%
+  filter(d7 == 1) %>% pull(a.user_id)
+i = 1
+for(f in files){
+  assign(paste0("f_", i), 
+    read_csv(paste0("data/0513_dat/first_and_total_Oparation/", f)) %>%
+    filter(a.user_id %in% user) %>%
+    mutate(d7_ac = ifelse(a.user_id %in% d7_user, 1, 0))%>%
+    rename(user_id = a.user_id)
+    # mutate_if(is.character,as.numeric)
+    )
+  i = i + 1
+}
+Operation = f_1 %>% 
+  inner_join(f_2 %>% select(-d7_ac), by='user_id') %>%
+  inner_join(f_3 %>% select(-d7_ac), by='user_id') %>%
+  inner_join(f_4 %>% select(-d7_ac), by='user_id') %>%
+  inner_join(f_5 %>% select(-d7_ac), by='user_id') 
+df = Operation
+iterator = names(df %>%select_if(is.numeric)%>%
+                   select(-d7_ac))
+important_var = c()
+for(col in iterator){
+x= unlist((df %>% filter(d7_ac == 1))[,col]);
+y= unlist((df %>% filter(d7_ac == 0))[,col]);
+if(is.na(var.test(x, y)$p.value< -1)){next}
+else if(var.test(x, y)$p.value <= 0.05){
+  p_value = t.test(x, y, var.equal = FALSE)$p.value
+}
+else if(var.test(x, y)$p.value > 0.05){
+  p_value = t.test(x, y, var.equal = TRUE)$p.value
+}
+if(p_value <= 0.05){
+  important_var = c(important_var, col)
+}
+}
+# apply rate, save rate, distinct_use, 第幾天的曝光數。
+
+# 看第一天的哪些行為會是在留存/流失差異最大。
+# d1和d2_7的差異
+
+# k mean的結果 dummy variable
+
+# t test
+tibble(sub_ads= important_var) %>%
+  writexl::write_xlsx(., path = "sub_ads.xlsx")
+```
+
+
+# **第二階段**：算出哪些因子影響留存率後，計算廣告收入和使用者留存率的trade-off。
+
+## 什麼是**最優廣告數**？
+
+
+
+
+# Other issues
+
+## 看廣告 < n次的人，計算廣告收益和retention的Trade-off
+
+## 找不同群體對「因廣告免費試用」的傾向、找因廣告而訂閱免費試用的比率
+
+## 付費可能性最高族群的流失情形/ 流失最快的族群
+
+# 0317 老師建議
+
+- 可以分類，看看`卡方檢定`！
+
+- sequential data mining: 用時序性的資料
+
+- 有畫一張時間和廣告曝光數的圖
