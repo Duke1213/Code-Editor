@@ -1,0 +1,506 @@
+---
+title: "碳邊境管制 分析"
+author: "劉德駿 Duke Liu"
+date: "2021/07/21"
+output:
+  prettydoc::html_pretty:
+    theme: architect
+    highlight: github
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 前言
+
+-   美日受影響的產品類別(hs6)有`110`個，而歐盟共計`246`項產品
+
+```{r, include=F}
+library(tidyverse)
+library(readxl)
+library(kableExtra)
+eu <- read_excel('data/0721_CBAM_data.xlsx', sheet= 1) %>% 
+  mutate(industry = substr(hs6, 1,2))
+us <- read_excel('data/0721_CBAM_data.xlsx', sheet= 2) %>% 
+  mutate(industry = substr(hs6, 1,2))%>%
+  mutate(
+    amount_16 = replace_na(amount_16, 0),
+    amount_17 = replace_na(amount_17, 0),
+    amount_18 = replace_na(amount_18, 0),
+    amount_19 = replace_na(amount_19, 0),
+    amount_20 = replace_na(amount_20, 0),
+  )
+
+jp <- read_excel('data/0721_CBAM_data.xlsx', sheet= 3) %>% 
+  mutate(industry = substr(hs6, 1,2)) %>%
+  mutate(
+    amount_16 = replace_na(amount_16, 0),
+    amount_17 = replace_na(amount_17, 0),
+    amount_18 = replace_na(amount_18, 0),
+    amount_19 = replace_na(amount_19, 0),
+    amount_20 = replace_na(amount_20, 0),
+  )
+```
+
+# 歐盟_資料呈現
+
+## 台對歐出口產品項的數量比較(HS2)
+
+可觀察到受影響產業項目數量多為鋼鐵業`72, 73`。
+
+```{r, echo=F}
+eu %>% count(industry) %>%
+  ggplot()+ aes(x = "", y= n, fill = industry) + 
+  geom_bar(width = 1, stat = "identity") + 
+  coord_polar("y", start=0) + 
+  labs(title = '出口hs2產品項目比較')
+```
+
+## 台對歐出口值年變化趨勢圖(HS2)
+
+- 用HS4畫出來的圖，產業分類太細，報表不易呈現。
+- 由於產業72的出口值比重超過9成，因此資料不平衡，這邊用log將各產業的出口值平衡。
+- 然而缺點是，取log的出口值，反倒觀察不出年趨勢。
+
+```{r, echo = F}
+eu %>% 
+  gather('year', 'value', 3:7) %>%
+  mutate(year = substr(year, nchar(year)-1, nchar(year)))%>%
+  group_by(year, industry) %>%
+  mutate(industry_value = sum(value)) %>% ungroup() %>%
+  mutate(industry_value = log(industry_value)) %>%
+  ggplot() + aes(x = year, y = industry_value, fill = industry) +
+  geom_bar(stat = "identity", position = 'dodge')+
+  labs(y="log(千美元)",x="year")
+```
+
+### 台對歐出口量年變化趨勢圖(HS2)
+
+出口量這邊也是遇到資料不平衡的現象。
+加上有missing，這邊由於筆數較少，故直接drop。
+（和上一張圖大同小異，在此忽略）
+
+```{r, include=F}
+eu %>% 
+  gather('year', 'value', 8:12) %>% 
+  mutate(year = substr(year, nchar(year)-1, nchar(year)))%>%
+  drop_na()%>%
+  group_by(year, industry) %>%
+  mutate(industry_value = sum(value)) %>% ungroup() %>%
+  mutate(industry_value = log(industry_value)) %>%
+  ggplot() + aes(x = year, y = industry_value, fill = industry) +
+  geom_bar(stat = "identity", position = 'dodge')+
+  labs(y="log(amoun)t",x="year")
+```
+
+## 進一步針對產業72, 73(鋼鐵業)的細項作分析
+
+由於鋼鐵業在值與量都是產業出口的大宗，因此我想針對該產業進行進一步分析。
+
+### 鋼鐵業各產品的出口項目比較(hs4)
+
+可觀察到出口產品項目大致平衡
+```{r, echo=F}
+eu %>%
+  filter(industry %in% c('72', '73')) %>% select(-industry) %>%
+  mutate(product = substr(hs6, 1, 4))%>%
+  count(product) %>%
+  ggplot() + aes(x='',y=n,fill=product) + 
+  geom_bar(width = 1, stat = "identity") + 
+  coord_polar("y", start=0)
+```
+
+### 鋼鐵業各產品的出口值比重
+
+從這張圖可以看出鋼鐵產業作為台對歐的最大宗，就出口值的角度分析，有幾個主要的HS4產品類別，受到的衝擊較顯著。
+
+- 由於同一產業內的資料筆數平衡，因此忽略rescaling的處理。
+
+- 另外，出口量和出口值的結果一致，所以這邊只呈現出口值供參考！
+
+- 受影響的產業(hs4)主要有： `7208`, `7209`, `7210`, `7219`, `7306`。其中`7209`在18年後才有顯著提升，而`7219`則是受影響最多的產業。
+```{r, echo=F}
+eu %>%
+  filter(industry %in% c('72', '73')) %>% select(-industry) %>%
+  mutate(product = substr(hs6, 1, 4))%>%
+  
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>%
+  group_by(year, product) %>%
+  mutate(product_value = sum(value)) %>% ungroup() %>%
+  #select(product, product_value,year)%>%filter(year == '18')%>%arrange(desc(product_value))%>%view
+  group_by(year) %>% mutate(avr = mean(product_value)) %>%
+  filter(product_value > avr*0.2) %>% ungroup() %>%
+  ggplot() + aes(x = year, y = product_value, fill = product) +
+  geom_bar(stat = "identity", position = 'dodge')+
+  labs(y="出口值(千美元)",x="year")
+```
+
+### 再進一步分析對歐盟主要hs6的出口影響
+```{r, echo=F}
+eu %>%
+  filter(industry == '72') %>% select(-industry) %>%
+  mutate(product = substr(hs6, 1, 4))%>%
+  filter(product %in% c('7208','7209','7210','7219'))%>%
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>%
+  group_by(year, hs6) %>%
+  mutate(product_value = sum(value)) %>% ungroup() %>%
+  group_by(year) %>% mutate(avr = mean(product_value)) %>%
+  filter(product_value > avr*0.2) %>% ungroup() %>%
+  
+  ggplot() + aes(year, product_value, fill = hs6) +
+  geom_bar(stat = "identity", position = 'dodge')+
+  labs(y="h6 產值（千美元）",x="year")+ coord_flip()
+```
+這張圖雜訊太多，我們挑出產值大於每年平均的歐盟hs6產業來看。
+```{r, echo = F}
+eu %>%
+  filter(industry %in% c('72', '73')) %>% select(-industry) %>%
+  mutate(product = substr(hs6, 1, 4))%>%
+  filter(product %in% c('7208','7209','7210','7219', '7306'))%>%
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>% 
+  group_by(year, hs6) %>%
+  mutate(product_value = sum(value)) %>% ungroup() %>%
+  
+  group_by(year) %>% mutate(avr = mean(product_value)) %>%
+  filter(product_value > avr) %>% ungroup() %>%
+  #count(hs6)%>%view
+  ggplot() + aes(year, product_value, fill = hs6) +
+  geom_bar(stat = "identity", position = 'dodge')+
+  labs(y="h6 產值（千美元）",x="year")+ coord_flip()
+```
+
+- 即可清楚觀察到，圖中顯示影響較為重大的台對歐出口產業們（按hs6）。
+
+## 重大產業按年的折線圖
+
+我們挑出前七大的hs6產業，觀察其對出口產值貢獻的趨勢。
+
+- '721934', '721049', '721933','721070','720839', '721061', '730640'
+```{r, echo=F}
+eu %>%
+  filter(hs6 %in% c('721934', '721049', '721933','721070','720839', '721061','730640')) %>% 
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>% 
+  select(hs6, year, value) %>% 
+  ggplot() + aes(year, value, group=hs6, color=hs6) + 
+  geom_line(linetype = "dashed",size=1) +
+  geom_point(shape = 22, size = 3, fill = "white")+
+  labs(y = '產值（千美元）')
+```
+```{r, echo= F}
+eu2 = eu %>%
+  filter(hs6 %in% c('721934', '721049', '721933','721070','720839', '721061','730640')) %>% 
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>% 
+  select(hs6, year, value) 
+
+eu2$year = as.numeric(eu2$year)
+ggplot(eu2, aes(x = year, y = value, fill = hs6)) +
+  geom_area(colour = "black", size = .2, alpha = .4) +
+  #scale_fill_brewer(palette = "Blues", breaks = rev(levels(eu2$hs6))) +
+  theme(legend.position = 'right') +
+  labs(x = '年份', y= '產值(千美元)', title = '台對歐盟之 前七大鋼鐵業出口產值貢獻')
+
+eu2 %>%
+  ggplot() + aes(x = hs6, y= value, color=hs6) + geom_boxplot() +
+  labs(x= '產業hs6', y= '產值（千美元）', title = '各產業產值之盒型圖') +
+  geom_dotplot(binaxis='y', stackdir='center', dotsize=1) +
+  theme_classic()
+
+
+rm(eu2)
+```
+
+### 不同產業的總貢獻比例圖 & 重大產業出口值的趨勢
+
+- 可觀察到，5年中佔台對歐盟出口值的大宗商品為`721934`, `721933`
+
+- 基本上，趨勢和所有產品出口值一致，都是`先升後降`。顯示鋼鐵業在我對歐的出口中`有代表性`的角色！
+```{r, echo=F}
+par(mfrow=c(1,2))
+
+eu %>%
+  filter(hs6 %in% c('721934', '721049', '721933','721070','720839', '721061','730640')) %>%
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>% 
+  select(hs6, year, value) %>% group_by(hs6) %>%
+  summarise(product_sum = sum(value)) %>% ungroup()%>%
+  mutate(total_value = product_sum/sum(product_sum))%>%
+  ggplot() + aes(x='',y=total_value,fill=hs6) + 
+  geom_bar(width = 1, stat = "identity") + 
+  coord_polar("y", start=0) +
+  labs(title = '重大產業出口值比例')
+
+eu %>%
+  filter(hs6 %in% c('721934', '721049', '721933','721070','720839', '721061','730640')) %>%
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>%
+  group_by(year) %>%
+  mutate(industry_value = sum(value)) %>% ungroup() %>%
+  ggplot() + aes(year, industry_value) +
+  geom_bar(stat = "identity") + labs(title = '重大產業出口值趨勢',y="value",x="year")
+```
+
+## 表格整理
+
+單位：千美元
+```{r, echo = F}
+df = eu %>%
+  filter(hs6 %in% c('721934', '721049', '721933','721070','720839', '721061','730640')) %>%
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>% 
+  select(hs6, year, value)%>%
+  spread(year, value) %>% column_to_rownames(var = 'hs6')
+
+kable(df, "html") 
+
+rm(df)
+```
+
+## 補充鋁業
+
+大部分的鋁業產值都很低，我們把產值低於每年平均的hs6項目刪除。可以看出，影響較為重大的項目為`760110`, `760120`, `760820`
+```{r, echo=F}
+eu %>%
+  filter(industry == '76') %>% select(-industry) %>%
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>% 
+  
+  group_by(year) %>% mutate(avr = mean(value)) %>%
+  filter(value > avr) %>% ungroup() %>%
+  #arrange(desc(value))%>%view
+  ggplot() + aes(year, value, fill = hs6) +
+  geom_bar(stat = "identity", position = 'dodge')+
+  labs(y="h6 產值",x="year")+ coord_flip()
+```
+
+## 鋼鐵業各產品的出口量比重
+
+趨勢大致和出口值一致(在此忽略報表)
+
+```{r, include=F}
+eu %>%
+  filter(industry %in% c('72', '73')) %>% select(-industry) %>%
+  mutate(product = substr(hs6, 1, 4))%>%
+  
+  gather('year', 'value',8:12) %>% drop_na() %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>%
+  group_by(year, product) %>%
+  mutate(product_value = sum(value)) %>% ungroup() %>%
+  ggplot() + aes(x = year, y = product_value, fill = product) +
+  geom_bar(stat = "identity", position = 'dodge')+
+  labs(y="amount",x="year")
+```
+
+# USA
+
+和出口歐盟不同的是，我出口美主要是`72`鋼鐵業, 其次為`76`鋁
+
+- 產品73反而佔比非常低
+```{r, echo=F}
+us %>% count(industry) %>%
+  ggplot()+ aes(x = "", y= n, fill = industry) + 
+  geom_bar(width = 1, stat = "identity") + 
+  coord_polar("y", start=0)+
+  labs(title = 'hs2產業出口項目之品項')
+```
+
+## 觀察美國鋼鐵業的出口產值趨勢(hs4)
+
+為簡化圖表，我們把產值太低的產業剔除後，可看出幾個受影響重大的產業
+```{r, echo=F}
+us %>%
+  filter(industry == '72') %>% select(-industry) %>%
+  mutate(product = substr(hs6, 1, 4))%>%
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>%
+  group_by(year, product) %>%
+  mutate(product_value = sum(value)) %>% ungroup() %>%
+  group_by(year) %>% mutate(avr = mean(product_value)*.2)%>%
+  filter(product_value > avr) %>% ungroup()%>%
+  ggplot() + aes(x = year, y = product_value, fill = product) +
+  geom_bar(stat = "identity", position = 'dodge')+
+  labs(y="產值（千美元）",x="year")
+
+us %>%
+  mutate(product = substr(hs6, 1, 4))%>%
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>%
+  group_by(year, product) %>%
+  mutate(product_value = sum(value)) %>% ungroup() %>%
+  group_by(year) %>% mutate(avr = mean(product_value)*0.2)%>%
+  filter(product_value > avr) %>% ungroup() %>% 
+  ggplot() + aes(year, product_value, fill = product) +
+  geom_bar(stat = "identity", position = 'dodge')+
+  labs(y="產值（千美元）",x="year")
+  
+```
+
+# japan
+
+產業出口品項的分佈狀況和美國一致
+```{r, echo=F}
+jp %>% count(industry) %>%
+  ggplot()+ aes(x = "", y= n, fill = industry) + 
+  geom_bar(width = 1, stat = "identity") + 
+  coord_polar("y", start=0)
+```
+
+## 台出日之鋼鐵業出口產值趨勢
+
+同樣可觀察到幾個影響較為重大之hs4產業
+```{r, echo=F}
+jp %>%
+  filter(industry == '72') %>% select(-industry) %>%
+  mutate(product = substr(hs6, 1, 4))%>%
+  
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>%
+  group_by(year, product) %>%
+  mutate(product_value = sum(value)) %>% ungroup() %>%
+  ggplot() + aes(x = year, y = product_value, fill = product) +
+  geom_bar(stat = "identity", position = 'dodge')+
+  labs(y="產值（千美元）",x="year") +
+  coord_flip()
+```
+
+# 對各國出口值的比較、變化
+
+-   先按`產業`分類，我們先看看出口最大宗的鋼鐵業，並且依`年份`排列作比較。
+
+```{r, echo=F}
+eu %>%
+  filter(industry == '72') %>% select(-industry) %>%
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>%
+  group_by(year) %>%
+  mutate(industry_value = sum(value)) %>% ungroup() %>%
+  ggplot() + aes(year, industry_value) +
+  geom_bar(stat = "identity") + labs(y="value",x="year", title = '台對歐鋼鐵業（72）出口值年趨勢圖')
+
+us %>%
+  filter(industry == '72') %>% select(-industry) %>%
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>%
+  group_by(year) %>%
+  mutate(industry_value = sum(value)) %>% ungroup() %>%
+  ggplot() + aes(year, industry_value) +
+  geom_bar(stat = "identity") + labs(y="value",x="year", title = '台對美鋼鐵業（72）出口值年趨勢圖')
+
+jp %>%
+  filter(industry == '72') %>% select(-industry) %>%
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>%
+  group_by(year) %>%
+  mutate(industry_value = sum(value)) %>% ungroup() %>%
+  ggplot() + aes(year, industry_value) +
+  geom_bar(stat = "identity") + labs(y="value",x="year", title = '台對日鋼鐵業（72）出口值年趨勢圖')
+
+
+eu %>%
+  filter(industry %in% c('72', '73')) %>% select(-industry) %>%
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>%
+  group_by(year) %>%
+  mutate(industry_value = sum(value)) %>% ungroup() %>%
+  select(year, industry_value)%>% 
+  distinct(industry_value, .keep_all = T) %>%
+  mutate(country = 'eu')->a
+us %>%
+  filter(industry %in% c('72', '73')) %>% select(-industry) %>%
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>%
+  group_by(year) %>%
+  mutate(industry_value = sum(value)) %>% ungroup() %>%
+  select(year, industry_value)%>% 
+  distinct(industry_value, .keep_all = T)%>%
+  mutate(country = 'us') ->b
+jp %>%
+  filter(industry %in% c('72', '73')) %>% select(-industry) %>%
+  gather('year', 'value',3:7) %>%
+  mutate(year = substr(year, nchar(year)-1,nchar(year)))%>%
+  group_by(year) %>%
+  mutate(industry_value = sum(value)) %>% ungroup() %>%
+  select(year, industry_value)%>% 
+  distinct(industry_value, .keep_all = T)%>%
+  mutate(country = 'jp') ->c
+
+a %>% bind_rows(b) %>% bind_rows(c) %>%
+  ggplot() + aes(x = year, y = industry_value, fill= country) +
+  geom_bar(stat = "identity", position = 'fill') +
+  labs(x = 'year', y = '各國家佔比', title = "受影響產業（72+73） 在3個經濟體貢獻的出口值比較")
+```
+
+- 可以觀察到，出口值的年趨勢，在三個國家差異相當大！
+
+- 另外，台灣對3個經濟體的鋼鐵業出口中，出口歐盟的比例顯著大於美、日，顯示台灣鋼鐵業受影響最多的出口對象就是歐盟。
+
+## 對本國的產業出口衝擊估計(sum 各國的貢獻)
+
+這邊先忽略受影響產業佔本國對該國出口值的比例， 也先不考慮產業別，
+我們來觀察直接受影響產業的絕對值。
+
+- 這邊可以直接觀察到，我對外受影響產業的出口值在18年後顯著下降，可供研究者探討背後的政策意涵！
+```{r, echo = F}
+tb = tibble(
+  eu = c(836329 ,1305424 	,1772721 	,1300807, 	833713 ) ,
+  us = c(701835,	756616,	631646,	513992,	406928 ),
+  jp = c(444564 ,599764 ,632807 ,647066,	536109 )
+)
+tb= t(tb)
+colnames(tb) = c('16','17','18','19','20')
+tb = as_tibble(tb)
+tb %>%
+  mutate(country= c('eu','us','jp'))%>%
+  gather('year', 'value', 1:5) %>%
+  ggplot() + aes(x = year, y = value, fill = country) %>%
+  geom_bar(stat = 'identity', position = 'stack') +
+  labs(y = '產值（千美元）', title = '受影響產業出口值佔各國之貢獻')
+
+```
+
+## 產業佔比變化（CBAM前後）
+```{r, echo = F}
+tb = tibble(
+  pre = c(7.25, 12.9,6.83),
+  post = c(11.11, 9.58,9.1),
+  country = c('eu','us', 'jp')
+) %>% gather('screen', 'percentage', 1:2)
+
+tb$screen <- factor(tb$screen,levels = c('pre', 'post'))
+
+tb %>%
+  ggplot() + aes(country, percentage, fill = screen) +
+  geom_bar(stat = 'identity', position = 'dodge') +
+  labs(y= '百分比%', title= '該國佔出口產值比例：有無CBAM前後的比較')
+rm(tb)
+
+tb = tibble(
+  pre = c(23285834 ,41431496 ,21943152 ),
+  post = c(1209799 ,602203 , 572062 ),
+  country = c('eu', 'us', 'jp')
+) %>% gather(screen, value, 1:2)
+
+tb %>%
+  ggplot()+aes(country, value, fill = screen) +
+  geom_bar(stat= 'identity', position= 'stack')+
+  labs(title = '受影響產業產值佔比（資料為16-20年的年平均）', y = '產值（千美元）')
+```
+
+# 報告最終目的
+提供一個受影響企業之`負擔成本/ 出口值`， 觀察該比例對企業的影響大不大，供企業判斷
+（此為損失出口機會的`警訊`。）
+
+# Reference
+
+author: Duke, Liu
+email: b07801013@g.ntu.edu.tw
+
+歡迎來信指教！

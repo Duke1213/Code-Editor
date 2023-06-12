@@ -1,0 +1,490 @@
+---
+title: "綠能商品_關稅對進口之影響（panel data）"
+author: "Duke Liu"
+date: "2021/9/15"
+output:
+  prettydoc::html_pretty:
+    theme: tactile
+    highlight: github
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE, message=F}
+knitr::opts_chunk$set(echo = F, message = F, warning = F)
+library(tidyverse)
+library(plm)
+library(readxl)
+library(jtools)
+library(SciViews)
+library(showtext)
+showtext_auto()
+```
+
+# 說明
+
+之前的super full model純為巧合，無法再現。
+
+## 清資料 
+
+- `Shifting/scaling` variables will not affect their correlation with the response.
+
+以下6個國家會被排除，原因是在20年間missing超過10筆資料，包含排放量、GDP、FTD
+
+"Albania"
+"Côte d'Ivoire"
+`"Hong Kong, China"`
+"Saint Kitts and Nevis"
+"Saint Lucia"
+"Saint Vincent and the Grenadines"
+
+- CO2, GDP, FTD(貿易依賴程度)在16年後沒有資料，所幸各國波動不大，這邊會用前一年的值做填補。
+
+```{r}
+load('0823.rda')
+data = data %>% select(1:5, co2, GDP_current, FTD, country_EU, country_APEC, country_OPEC) #%>% mutate(tariff = 100*tariff)
+cv = c()
+for(cy in unique(data$country)){
+  dat = data %>% filter(country == cy)
+  if(sum(is.na(dat$FTD)) > 10){
+    # print(cy)
+    cv = c(cv, cy)
+  }
+}
+data = data %>% filter(!(country %in% cv))
+
+set.seed(1213) # may have problems
+data = data %>%
+  group_by(country) %>%
+  mutate(mean_co2 = mean(co2, na.rm= T),
+         max_gdp = max(GDP_current, na.rm= T),
+         max_ftd = max(FTD, na.rm= T)) %>% ungroup() %>%
+  mutate(co2 = ifelse(is.na(co2), rnorm(1, mean_co2, mean_co2/20), co2),
+         GDP_current = ifelse(is.na(GDP_current), rnorm(1,max_gdp,max_gdp/20), GDP_current),
+         FTD = ifelse(is.na(FTD), rnorm(1, max_ftd, max_ftd/20), FTD)) %>%
+  select(-mean_co2, -max_gdp, -max_ftd)
+data = data %>% group_by(country) %>%
+  mutate(eu = sum(country_EU, na.rm=T),
+         apec = sum(country_APEC, na.rm=T),
+         opec = sum(country_OPEC, na.rm=T)) %>% ungroup() %>%
+  mutate(country_EU = ifelse(eu > 3, 1, 0),
+         country_APEC = ifelse(apec > 3, 1, 0),
+         country_OPEC = ifelse(opec > 3, 1, 0)) %>%
+  select(-eu, -apec, -opec) %>%
+  mutate(year_15 = ifelse(as.numeric(year) >= 2015, 1, 0))
+
+library(haven)
+pop = read_dta('data/DATA_20200711.dta') %>%
+  select(country, year, POP) %>%
+  mutate_at('year', as.factor) 
+data = data %>% mutate_at('year', as.factor) %>%
+  left_join(pop, by = c('country' = 'country', 
+                             'year' = 'year')) %>%
+  group_by(country) %>% mutate(mean_pop = mean(POP, na.rm=T)) %>%
+  ungroup() %>%
+  mutate(POP = ifelse(is.na(POP), rnorm(1, mean_pop, mean_pop/20), POP)) %>% select(-mean_pop) 
+
+data = data %>% 
+  mutate(ln_GDP = ln(GDP_current),
+         ln_NI = ln(GDP_current/ (POP+1)),
+         ln_co2 =ln(co2+1),
+         ln_tariff = ln(tariff), 
+         ln_import = ln(im_vl)) %>% select(-GDP_current, -POP) %>% 
+  mutate(ln_tariff = ifelse(tariff == 0, 0, ln_tariff),
+         ln_import = ifelse(im_vl == 0, 0, ln_import))
+
+data = pdata.frame(data,c("country","year"))
+
+rm(cv, cy, dat, pop, emission, Export, Import, Tariff)
+# pd = data %>%
+#   drop_na() %>% 
+#   mutate(GDP_current = GDP_current/10e7)
+# rm(data)
+```
+
+### 稍微看一下變數間的關聯性
+
+- 避免多重共線性
+
+```{r}
+round(cor(data[, c(4, 6, 7, 8, 9, 10, 11, 12, 13, 15)]), 2)
+```
+
+
+## new model
+
+- 國家數114, 橫跨2001~2019年
+
+- 變數解釋
+
+`im_vl`: the import value of renewable energy in thousand dollars.
+
+`ln_tariff`: natural log of tariff. **ln(0)=-Inf, which would be imputed with 0.**
+
+`FTD`: foreign trade dependency
+
+`ln_GDP`: natural log of GDP
+
+`ln_NI`: natural log of GDP per capita.
+
+- Result:
+
+平均而言，二氧化碳排放增加1單位，綠色商品進口值增加115.46單位。
+
+人均GDP增加1%，綠色商品進口值增加190.6836單位（`elasticity`）
+
+關稅在個體固定效果模型中，表現稍微顯著，惟模型的R square 不高。
+
+**關稅增加1%，綠色商品進口值減少208單位**
+
+```{r}
+md = im_vl ~ ln_tariff + co2 + country_APEC + country_OPEC + country_EU + FTD + ln_GDP + ln_NI
+pool1 <- plm(md, data, model='pooling')
+re1<-plm(md, data, model='random')
+fe1<-plm(md, data, model='within', effect='individual')
+fe2<-plm(md, data, model='within', effect='time')
+
+export_summs(pool1,re1,fe1,fe2,
+          model.names  = c("Pooled OLS","random","FE-individual","FE-time"))
+```
+
+## change response variable to elasticity.
+
+- Result:
+
+在個體固定效果模型中，每增加1%的關稅，綠能商品進口值會下降0.33%
+
+- problem
+
+關稅的效應雖然顯著了，但是在時間以及個體效應模型的表現差很多。
+
+CO2, FTD 換成彈性解釋的話，影響會變很小
+
+POOL 和 time FE的預測能力最好，這點有點奇怪。
+
+```{r}
+md = ln_import ~ ln_tariff + co2 + country_APEC + country_OPEC + country_EU + FTD + ln_GDP + ln_NI
+pool1 <- plm(md, data, model='pooling')
+re1<-plm(md, data, model='random')
+fe1<-plm(md, data, model='within', effect='individual')
+fe2<-plm(md, data, model='within', effect='time')
+
+export_summs(pool1,re1,fe1,fe2,
+          model.names  = c("Pooled OLS","random","FE-individual","FE-time"))
+```
+
+## 加入15年dummy 且使用ln(co2)
+
+解釋能力有提高，但這次換成`CO2的變數怪怪的`
+
+平均而言，考量到該國的固定效果，16年（含）後的綠能商品進口值會提升0.46%
+
+- fe- time 模型關稅的效應是正的，不合我們的預期。
+
+- fe- individual的係數表現不錯，但R square反而低
+
+```{r}
+md = ln_import ~ ln_tariff + ln_co2 + country_APEC + country_OPEC + country_EU + FTD + ln_GDP + ln_NI + year_15
+pool1 <- plm(md, data, model='pooling')
+re1<-plm(md, data, model='random')
+fe1<-plm(md, data, model='within', effect='individual')
+fe2<-plm(md, data, model='within', effect='time')
+
+export_summs(pool1,re1,fe1,fe2,
+          model.names  = c("Pooled OLS","random","FE-individual","FE-time"))
+
+```
+
+### 主要污染大國
+
+- 關稅和GDP對綠能商品進口值的效應加強了、人均GDP變得不顯著。
+
+- co2 的影響還是怪怪的
+```{r}
+data %>% 
+  group_by(country) %>% mutate(mean_co2 = sum(co2, na.rm = T)) %>%
+  ungroup() %>% distinct(country, .keep_all = T) %>%
+  arrange(desc(mean_co2)) %>%
+  # mutate(median = median(mean_co2)) %>%
+  filter(mean_co2 >= median(mean_co2)) %>% pull(country) %>% as.character(.)-> cy
+
+md = ln_import ~ ln_tariff + ln_co2 + country_APEC + country_OPEC + country_EU + FTD + ln_GDP + ln_NI + year_15
+pool1 <- plm(md, data[data$country %in% cy,], model='pooling')
+re1<-plm(md, data[data$country %in% cy,], model='random')
+fe1<-plm(md, data[data$country %in% cy,], model='within', effect='individual')
+fe2<-plm(md, data[data$country %in% cy,], model='within', effect='time')
+
+export_summs(pool1,re1,fe1,fe2,
+          model.names  = c("Pooled OLS","random","FE-individual","FE-time"))
+
+head(cy, 10)
+rm(cy)
+```
+
+### 篩選主要GDP大國
+
+
+```{r}
+data %>% 
+  group_by(country) %>% mutate(mean_GDP = sum(ln_GDP, na.rm = T)) %>%
+  ungroup() %>% distinct(country, .keep_all = T) %>%
+  arrange(desc(mean_GDP)) %>%
+  # mutate(median = median(mean_co2)) %>%
+  filter(mean_GDP >= median(mean_GDP)) %>% pull(country) %>% as.character(.)-> cy
+
+md = ln_import ~ ln_tariff + ln_co2 + country_APEC + country_OPEC + country_EU + FTD + ln_GDP + ln_NI + year_15
+pool1 <- plm(md, data[data$country %in% cy,], model='pooling')
+re1<-plm(md, data[data$country %in% cy,], model='random')
+fe1<-plm(md, data[data$country %in% cy,], model='within', effect='individual')
+fe2<-plm(md, data[data$country %in% cy,], model='within', effect='time')
+
+export_summs(pool1,re1,fe1,fe2,
+          model.names  = c("Pooled OLS","random","FE-individual","FE-time"))
+head(cy, 10)
+rm(cy)
+```
+
+
+### 只看APEC國家
+
+由於pool的模型中，15年前後的虛擬變數相當顯著，推測可能是主要大國的關稅政策之影響，所以這邊針對APEC國家做個比較
+
+- 結果顯示，對APEC國家而言，15年後的綠能商品進口值確實有顯著增加
+
+- 然而，碳排放和人均GDP的效應跟著消失
+```{r}
+pdd = data %>%
+  filter(country_APEC == 1)
+
+md = ln_import ~ ln_tariff + ln_co2  + FTD + ln_NI + year_15 + ln_GDP
+pool1 <- plm(md, data=pdd, model='pooling')
+re1<-plm(md, data=pdd, model='random')
+fe1<-plm(md, data=pdd, model='within', effect='individual')
+export_summs(pool1,re1,fe1,
+          model.names  = c("Pooled OLS","random","FE-individual"))
+rm(pdd)
+```
+
+- 不同的模型中，15年前後是有顯著影響的，代表整體而言，所有的apec國家的確在15年後有增加進口的趨勢。`也許這個趨勢是來自於個別國家的綠色新政`。
+
+## APEC vs. non- APEC
+
+整體來說，`關稅率`的影響在個別國家都很顯著。
+
+
+```{r}
+data %>% 
+  mutate(union = case_when(
+    country_APEC == 1 ~ 'APEC',
+    country_OPEC == 1 ~ 'OPEC',
+    country_EU == 1 ~ 'EU',
+    T ~ 'other'
+  )) %>%
+  ggplot() + aes(x = tariff, y = im_vl, color = union) +
+  geom_jitter() + annotate("text", x=20, y=0.6*10e6, label= "相關性：-0.02399") + 
+  labs(title = '地區性貿易夥伴之關稅和進口散佈圖')
+
+data %>% 
+  mutate(union = case_when(
+    country_APEC == 1 ~ 'APEC',
+    country_OPEC == 1 ~ 'OPEC',
+    country_EU == 1 ~ 'EU',
+    T ~ 'other'
+  )) %>%
+  ggplot() + aes(x = co2, y = im_vl, color = union) +
+  geom_jitter() + annotate("text", x=8000, y=4*10e5, label= "相關性：0.82") + 
+  labs(title = '地區性貿易夥伴之碳排放和進口散佈圖')
+
+data %>% 
+  mutate(union = case_when(
+    country_APEC == 1 ~ 'APEC',
+    country_OPEC == 1 ~ 'OPEC',
+    country_EU == 1 ~ 'EU',
+    T ~ 'other'
+  )) %>%
+  ggplot() + aes(x = FTD, y = im_vl, color = union) +
+  geom_jitter() + annotate("text", x=300, y=4*10e5, label= "相關性：-0.043") + 
+  labs(title = '地區性貿易夥伴之貿易依賴程度和進口散佈圖')
+
+data %>% 
+  mutate(union = case_when(
+    country_APEC == 1 ~ 'APEC',
+    country_OPEC == 1 ~ 'OPEC',
+    country_EU == 1 ~ 'EU',
+    T ~ 'other'
+  )) %>%
+  ggplot() + aes(x = ln_NI, y = im_vl, color = union) +
+  geom_jitter() + annotate("text", x=10, y=4*10e5, label= "相關性：0.142") + 
+  labs(title = '地區性貿易夥伴之 ln(人均GDP)和進口散佈圖')
+  
+data %>%
+  filter(country_APEC == 1) %>%
+  mutate_at('year_15', as.factor) %>%
+  ggplot() + aes(x= tariff, y = im_vl, color= year_15) +
+  geom_jitter() +
+  labs(title = '15年前後 APEC國家的關稅和進口變化')
+data %>%
+  filter(country_APEC == 1) %>%
+  mutate_at('year_15', as.factor) %>%
+  ggplot() + aes(x= co2, y = im_vl, color= year_15) +
+  geom_jitter() +
+  labs(title = '15年前後 APEC國家的碳排放和進口變化')
+```
+
+# summary
+
+- 人口在關稅對綠能商品進口值的效應中，可能是一個干擾因子。
+
+- 15年前後： year_15的虛擬變數整體而言顯著。
+
+- 整體而言， `關稅率、人均GDP 、貿易依賴程度、整體碳排放率、APEC國家都對綠能商品進口有顯著影響`。
+
+- `ln_NI`: 經濟發展好的地方進口比較多綠色商品
+
+待處理的問題
+
+- POOL 和 time FE的預測能力最好，這點有點奇怪
+
+- 產品別: 關稅資料missing太多，實作困難
+
+- ln（co2） 和 FTD ，用彈性來解釋的話，影響變小
+
+- 不同模型中，部分變數表現差很多，例如`碳排放的係數不符我們的預期`、`關稅的效應雖然顯著了，但是在時間以及個體效應模型的表現差很多`。
+
+# reference
+
+author： Duke Liu 
+
+**b07801013@g.ntu.edu.tw**
+
+## appendix I:拆解固定效果
+```{r}
+md = ln_import ~ ln_tariff + ln_co2 + country_APEC + country_OPEC + country_EU + FTD + ln_GDP + ln_NI + year_15
+pool1 <- plm(md, data, model='pooling')
+re1<-plm(md, data, model='random')
+fe1<-plm(md, data, model='within', effect='individual')
+fe2<-plm(md, data, model='within', effect='time')
+
+## 拆解固定效果
+summary(fixef(fe1))
+# fx_level <- fixef(fe1, type = "level")
+# fx_dmean <- fixef(fe1, type = "dmean")
+# overallint <- within_intercept(fe1)
+# all.equal(overallint + fx_dmean, fx_level, check.attributes = FALSE)
+# rm(fx_level, fx_dmean, overallint)
+
+fixef(fe2)
+```
+
+## appendix II: product dummy!
+
+1. 16個 dummy variable
+
+2. 跑（產品， 國家）的panel data
+
+Fail... QQ
+
+```{r, eval=F, echo=T}
+load('0825.rda')
+product = c(excel_sheets("data/import for RE_1.xlsx"), 
+            excel_sheets("data/import for RE_2.xlsx"))
+pdd = data %>%
+  left_join(Import, by = c('country' = 'Importers', 'year' = 'year')) %>% select(-tariff) %>%
+  left_join(Tariff, by = c('country' = 'country', 'year' = 'year')) %>%
+  mutate(product_841919 = ifelse(HS6 == '841919', 1, 0), 
+         product_850164 = ifelse(HS6 == '850164', 1, 0),
+         product_850231 = ifelse(HS6 == '850231', 1, 0),
+         product_850239 = ifelse(HS6 == '850239', 1, 0),
+         product_850300 = ifelse(HS6 == '850300', 1, 0),
+         product_850490 = ifelse(HS6 == '850490', 1, 0),
+         product_850680 = ifelse(HS6 == '850680', 1, 0),
+         product_850690 = ifelse(HS6 == '850690', 1, 0),
+         product_850720 = ifelse(HS6 == '850720', 1, 0),
+         product_853120 = ifelse(HS6 == '853120', 1, 0),
+         product_854110 = ifelse(HS6 == '854110', 1, 0),
+         product_854140 = ifelse(HS6 == '854140', 1, 0),
+         product_900190 = ifelse(HS6 == '900190', 1, 0),
+         product_901380 = ifelse(HS6 == '901380', 1, 0),
+         product_901390 = ifelse(HS6 == '901390', 1, 0),
+         product_940540 = ifelse(HS6 == '940540', 1, 0)) %>%
+  drop_na()
+# pdd = pdata.frame(pdd, c('country', 'year'))
+md = im_value ~ tariff + co2 + product_841919 + product_850164 + product_850231 + product_850239 + product_850300 + product_850490 + product_850680 + product_850690 + product_850720 + product_853120 + product_854110 + product_854140 + product_900190 + product_901380 + product_901390 + product_940540
+
+md = im_vl ~ tariff + co2  + FTD + gdp_cap + year_15
+pool1 <- plm(md, data=pdd, model='pooling')
+re1<-plm(md, data=pdd, model='random')
+fe1<-plm(md, data=pdd, model='within', effect='individual')
+export_summs(pool1,re1,fe1,
+          model.names  = c("Pooled OLS","random","FE-individual"))
+rm(pdd)
+```
+
+```{r, eval=F, echo=T}
+
+product = c(excel_sheets("data/import for RE_1.xlsx"), 
+            excel_sheets("data/import for RE_2.xlsx"))
+load('0823.rda')
+load('0825.rda')
+data = data %>% select(1:5, co2, ghg, GDP_current, FTD, country_EU, country_APEC, country_OPEC) %>%
+  mutate(tariff = 100*tariff)
+cv = c()
+for(cy in unique(data$country)){
+  dat = data %>% filter(country == cy)
+  if(sum(is.na(dat$FTD)) > 10){
+    print(cy)
+    cv = c(cv, cy)
+  }
+}
+data = data %>% filter(!(country %in% cv))
+set.seed(1213)
+data = data %>%
+  group_by(country) %>%
+  mutate(mean_co2 = mean(co2, na.rm= T),
+         mean_gdp = mean(GDP_current, na.rm= T),
+         mean_ftd = mean(FTD, na.rm= T),) %>% ungroup() %>%
+  mutate(co2 = ifelse(is.na(co2), mean_co2, co2),
+         GDP_current = ifelse(is.na(GDP_current), mean_gdp, GDP_current),
+         FTD = ifelse(is.na(FTD), mean_ftd, FTD)) %>%
+  select(-mean_co2, -mean_gdp, -mean_ftd)
+data = data %>% group_by(country) %>%
+  mutate(eu = sum(country_EU, na.rm=T),
+         apec = sum(country_APEC, na.rm=T),
+         opec = sum(country_OPEC, na.rm=T)) %>% ungroup() %>%
+  mutate(country_EU = ifelse(eu > 3, 1, 0),
+         country_APEC = ifelse(apec > 3, 1, 0),
+         country_OPEC = ifelse(opec > 3, 1, 0)) %>%
+  select(-eu, -apec, -opec) %>%
+  mutate(year_15 = ifelse(as.numeric(year) >= 2015, 1, 0))
+library(haven)
+pop = read_dta('data/DATA_20200711.dta') %>%
+  select(country, year, POP) %>%
+  mutate_at('year', as.factor) 
+data = data %>% mutate_at('year', as.factor) %>%
+  left_join(pop, by = c('country' = 'country', 
+                             'year' = 'year')) %>%
+  group_by(country) %>% mutate(mean_pop = mean(POP, na.rm=T)) %>%
+  ungroup() %>%
+  mutate(POP = ifelse(is.na(POP), mean_pop, POP)) %>% select(-mean_pop) %>%
+  mutate(gdp_cap = (GDP_current+1)/(POP+1),
+         co2_cap =((co2+1)/(POP+1))*10e7)
+pdd = data %>%
+  left_join(Import, by = c('country' = 'Importers', 'year' = 'year')) %>% select(-tariff) %>%
+  left_join(Tariff, by = c('country' = 'country', 'year' = 'year')) %>%
+  filter(country_APEC == 1) %>% group_by(HS6) %>%
+  mutate(im_value = sum(im_value, na.rm = T)) %>% ungroup() %>%
+  mutate(index = paste0(HS6, '_',year)) %>%
+  distinct(index, .keep_all = T) %>% select(-index)
+
+pdd = pdata.frame(pdd, c('HS6', 'year'))
+
+md = im_value ~ tariff + gdp_cap + FTD + co2
+pool1 <- plm(md, data=pdd, model='pooling')
+re1<-plm(md, data=pdd, model='random')
+fe1<-plm(md, data=pdd, model='within', effect='individual')
+export_summs(pool1,re1,fe1,
+          model.names  = c("Pooled OLS","random","FE-individual"))
+
+rm(emission, Export, Import, Tariff, data, pop, dat)
+```

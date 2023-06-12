@@ -1,0 +1,281 @@
+---
+title: "碳邊境管制 建模"
+author: "劉德駿 Duke Liu"
+date: "2021/08/10"
+output:
+  prettydoc::html_pretty:
+    theme: architect
+    highlight: github
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, include=F, message=F}
+library(tidyverse)
+library(magrittr)
+library(plm)
+library(readxl)
+library(haven)
+library(kableExtra)
+library(stargazer)
+
+pd = c('732190', '841919', '850164', '850231', '850239', '850300', '850490', '850680', '850690', '850720', '853120', '854110', '854140', '900190', '901380', '901390', '940540')
+tariff = c(6.8, 2.5, 8.38, 5, 7.5, 1, 1.7, 1.25, 2.5, 6, 0.00000001, 0.00000001, 0.00000001, 3.93, 3.75, 0.00000001, 5.42)
+```
+
+## 整理資料
+
+- missing的出口值會用`0`代替, 這邊用的進出口值為`綠能商品類`
+
+- 關稅部分 `na值會直接drop掉`。最後將同個國家`每年所有綠色商品`關稅做`平均`。
+
+
+```{r, include=F, warning=F, message=F}
+tb = tibble()
+for(i in 1:10){
+  a=read_excel('data/export for RE_1.xlsx', sheet = i) %>%
+    slice(-1) %>%
+    #mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+    gather('year', 'ex_value', 2:21) %>%
+    mutate(year = substr(year, 19,22))
+  tb = tb %>% bind_rows(a)
+}
+for(j in 1:7){
+  a=read_excel('data/export for RE_2.xlsx', sheet = j) %>%
+    slice(-1) %>%
+    # mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+    gather('year', 'ex_value', 2:21) %>%
+    mutate(year = substr(year, 19,22))
+  tb = tb %>% bind_rows(a)
+}
+export = tb %>% 
+  group_by(Exporters, year) %>% summarise(ex_vl = sum(ex_value))
+rm(a, tb)
+
+
+tb = tibble()
+for(i in 1: 10){
+  a=read_excel('data/import for RE_1.xlsx', sheet = i) %>%
+    slice(-1) %>%
+    mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+    gather('year', 'im_value', 2:21) %>%
+    mutate(year = substr(year, 19,22))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+for(j in 1:7){
+  a=read_excel('data/import for RE_2.xlsx', sheet = j) %>%
+    slice(-1) %>%
+    mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+    gather('year', 'im_value', 2:21) %>%
+    mutate(year = substr(year, 19,22))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+
+import = tb %>% 
+  group_by(Importers, year) %>% summarise(im_vl = sum(im_value))
+rm(tb)
+
+
+country_99 = read_excel('data/ge_trf_99.xlsx', sheet = 1) %>%
+  pull(`全球其他99國`)
+country_70 = read_excel('data/ge_trf_99.xlsx', sheet = 1) %>%
+  slice(1:70) %>% pull(`70國`)
+tb = tibble()
+for(i in ((1:99)[-81])){
+  df = read_excel('data/ge_trf_99.xlsx', sheet = i+3) %>%
+  gather('year', 'tariff', 6:25) %>% 
+  select(year, tariff) %>%
+  mutate_at('tariff', as.numeric) %>% 
+  group_by(year) %>% mutate(result = mean(tariff, na.rm=T)) %>% 
+  distinct(year, .keep_all = T) %>%
+  select(year, result)
+  colnames(df)[2] <- country_99[i]
+  if(i == 1){tb = df}
+  else{tb = tb %>% left_join(df, by = 'year')}
+  rm(df)
+}
+a = 1:70
+a= setdiff(a, c(8,29,61))
+for(j in a){
+  df = read_excel('data/ge_trf_70.xlsx', sheet = j+3) %>%
+  gather('year', 'tariff', 6:25) %>% 
+  select(year, tariff) %>%
+  mutate_at('tariff', as.numeric) %>% 
+  group_by(year) %>% mutate(result = mean(tariff, na.rm=T)) %>% 
+  distinct(year, .keep_all = T) %>%
+  select(year, result)
+  colnames(df)[2] <- country_70[j]
+  tb = tb %>% left_join(df, by = 'year')
+  rm(df)
+}
+tariff = tb %>% 
+  gather('country', 'trf', 2:166) %>%
+  mutate_at('trf', as.numeric) %>% drop_na(trf) 
+  # group_by(country) %>% summarise(tariff = sum(trf))
+  # 16 countries out of 165 countries don't have tariff data.
+rm(tb, country_70, country_99, a)
+
+
+data = read_dta('data/DATA_20200711.dta') %>%
+  select(country, year, CO2exLULUCF_C, GHGexLULUCF_C, EPE_ex, EPE_im, GElectron_ex, GElectron_im, GEnergy_ex, GEnergy_im, GM_ex, GM_im, LCT_ex, LCT_im, GDP_current) 
+emission = data %>%
+  drop_na(CO2exLULUCF_C) %>% select(country, year, CO2exLULUCF_C, GHGexLULUCF_C) %>%
+  rename(ghg = GHGexLULUCF_C, co2 = CO2exLULUCF_C)
+rm(data)
+
+
+dat = export %>% 
+  left_join(import, by = c("Exporters" = "Importers", "year" = "year")) %>%
+  left_join(tariff, by = c("Exporters" = "country", "year" = "year")) %>% 
+  mutate_at('year', as.numeric) %>% 
+  left_join(emission, by = c("Exporters" = "country", "year" = "year")) %>%
+  rename(country = Exporters)
+rm(emission, export, import, tariff, pd)
+```
+
+## show cleaned data
+```{r, echo = F}
+dat %>%
+  head(.,25) %>%
+  kable('html')
+```
+
+- year ranges from 2001 to 2020, 234 countries are included in the data set. 4680 samples are used here.
+
+- 1920 samples are missing their tariff data(`41%`) and 1768(`37%`) samples are missing their emission data.
+
+## Panel data
+```{r, echo = F, message=F, warning=F}
+data = pdata.frame(dat,c("country","year"))
+# rm(dat)
+data %>% 
+  ggplot()+
+  geom_point(aes(x=im_vl,y=I(ghg*1000), color = country))+
+  theme(legend.position = "none") +
+  labs(title = '關稅和進口值的散佈圖', subtitle = '(不同顏色代表不同國家)')
+
+data %>% 
+  ggplot()+
+  geom_point(aes(x=im_vl,y=I(ghg*1000), color = year))+
+  # theme(legend.position = "none") +
+  labs(title = '關稅和進口值的散佈圖', subtitle = '(不同顏色代表不同年份)')
+```
+
+## demean
+```{r, echo=F, warning=F}
+data %>% 
+  group_by(country) %>% 
+  drop_na(trf) %>%
+  mutate(
+    trf_demean=trf - mean(trf),
+    imvl_demean=im_vl - mean(im_vl)
+    ) %>%
+  select(trf_demean,imvl_demean) %>%
+  ungroup() %>% 
+  ggplot()+
+  geom_point(aes(x=imvl_demean,y=trf_demean,color=country))+
+  geom_smooth(aes(x=imvl_demean,y=trf_demean),method = "lm",se=FALSE) +
+  theme(legend.position = "none") + 
+  labs(title = '關稅和進口值demean後的散佈圖', subtitle = '顯示歷年的關稅變動很小')
+
+data %>% 
+  group_by(country) %>% 
+  mutate(
+    exvl_demean=ex_vl - mean(ex_vl),
+    imvl_demean=im_vl - mean(im_vl)
+    ) %>%
+  select(exvl_demean,imvl_demean) %>%
+  ungroup() %>% 
+  ggplot()+
+  geom_point(aes(x=imvl_demean,y=exvl_demean,color=country))+
+  geom_smooth(aes(x=imvl_demean,y=exvl_demean),method = "lm",se=FALSE) +
+  theme(legend.position = "none") + 
+  labs(title = '出口值和進口值demean後的散佈圖')
+
+data %>% 
+  group_by(country) %>% 
+  drop_na(ghg) %>%
+  mutate(
+    em_demean=ghg - mean(ghg),
+    imvl_demean=im_vl - mean(im_vl)
+    ) %>%
+  select(em_demean,imvl_demean) %>%
+  ungroup() %>% 
+  ggplot()+
+  geom_point(aes(x=imvl_demean,y=em_demean,color=country))+
+  geom_smooth(aes(x=imvl_demean,y=em_demean),method = "lm",se=FALSE) +
+  theme(legend.position = "none") + 
+  labs(title = '溫室氣體排放和進口值demean後的散佈圖')
+```
+
+## modeling
+
+- trf 若是每年都一樣，統計學上會難以收斂到係數估計值，將無法建模。所以這邊將40%的missing data去掉作分析。
+
+- 縮減後的樣本數為2457， 有關稅資料的國家有153個
+```{r, message=F}
+data = data %>% drop_na(trf)
+results = data %>%
+  lm(data = ., trf ~ factor(country))
+
+pool1 <- plm(trf ~ im_vl, data=data, model='pooling')
+summary(pool1)
+re1 <- plm(trf ~ im_vl, data=data, model='random')
+summary(re1)
+fe1 <- plm(trf ~ im_vl, data=data, model='within', effect = 'individual')
+summary(fe1)
+fe2 <- plm(trf ~ im_vl, data=data, model='within', effect = 'twoways')
+summary(fe2)
+
+stargazer(pool1,re1,fe1,fe2,type = 'text',
+          column.labels = c("Pooled OLS","RE","FE-individual","FE-two-ways"))
+```
+
+# Result
+
+- 進口值/ 出口值有共線性，故沒有放在模型裡。
+
+- 進口值對關稅的影響非常顯著
+
+- 然而，R square 的表現不好，表示單靠進口值一個變數不足以解釋關稅的變異。
+
+- 整體來看，固定效果模型和隨機效果模型的預測能力都比OLS要好。隨機效果模型雖然外推性差，但較適用於實際資料上。
+
+## 加入排放量做predictor
+```{r, echo = F}
+re2 <- plm(trf ~ im_vl + ghg, data=data, model='random')
+summary(re2)
+fe3 <- plm(trf ~ im_vl + ghg, data=data, model='within', effect = 'individual')
+stargazer(re2, fe3,type = 'text',
+          column.labels = c("RE","FE-individual"))
+```
+
+## Hausman Test
+
+H0: Random effect 殘差項中的固定效果成分和`im_vl`無關。兩個模型的結果不一致，應用random effect。
+```{r}
+phtest(fe1, re1)
+phtest(re2, fe3)
+```
+
+- 結果顯示，應使用random effect。
+
+
+# Reference
+
+https://bookdown.org/tpemartin/econometric_analysis/r-for-panel-data.html#section-6.1 
+
+劉德駿
+
+b07801013@g.ntu.edu.tw
+
+
+

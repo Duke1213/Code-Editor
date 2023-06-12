@@ -1,0 +1,773 @@
+---
+title: "碳邊境管制 分析"
+author: "劉德駿 Duke Liu"
+date: "2021/08/04"
+output:
+  prettydoc::html_pretty:
+    theme: architect
+    highlight: github
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, include=F}
+library(tidyverse)
+library(haven)
+library(readxl)
+library(kableExtra)
+library(GGally)
+pd = c('732190', '841919', '850164', '850231', '850239', '850300', '850490', '850680', '850690', '850720', '853120', '854110', '854140', '900190', '901380', '901390', '940540')
+tariff = c(6.8, 2.5, 8.38, 5, 7.5, 1, 1.7, 1.25, 2.5, 6, 0.00000001, 0.00000001, 0.00000001, 3.93, 3.75, 0.00000001, 5.42)
+```
+
+# 五大類產品：Green Energy, Green Electron, Environmental Protection Equipment, Green Material, Low Carbon Transportation
+
+## export
+
+### by year
+
+```{r, echo=F}
+ex_vl = numeric()
+for(i in 1: 10){
+  export = read_excel('data/export for RE_1.xlsx', sheet = i) 
+  export_value = export %>% 
+    slice(1) %>% select(-1) %>%
+    gather('year', 'aggregate_ex_value', 1:20) %>%
+    mutate(year = substr(year, 19,22)) %>% pull(aggregate_ex_value)
+  if(i == 1){ex_vl = export_value}
+  else{ex_vl = ex_vl + export_value}
+}
+for(i in 1: 7){
+  export = read_excel('data/export for RE_2.xlsx', sheet = i) 
+  export_value = export %>% 
+    slice(1) %>% select(-1) %>%
+    gather('year', 'aggregate_ex_value', 1:20) %>%
+    mutate(year = substr(year, 19,22)) %>% pull(aggregate_ex_value)
+  ex_vl = ex_vl + export_value
+}
+tibble(year = as.character(2001:2020), ex_value = ex_vl) %>%
+  ggplot() + aes(x = year, y= ex_value) + geom_col() +
+  labs(title = 'Green Energy商品全球出口值趨勢')
+rm(export, export_value, ex_vl)
+```
+
+由於進出口的資料只有`Green Energy`這個類別，故比較基準是基於`個別產品的HS6 碼`。
+
+### 以`國家`為單位來做 GE類商品出口值的分析
+
+這邊會針對單一國家，加總所有的綠能出口值。此外，每個國家出口的綠能品項不一，可能出現某些國家沒有出口的資料。
+
+-   `NaN` would be replaced with `0`.
+
+-   這邊如果在比較國家的基礎上加入年份，會把圖表複雜化。所以只取`2020`年的資料。
+
+```{r, echo = F, warning=F, message=F}
+tb = tibble()
+
+for(i in 1:10){
+  tbb = read_excel('data/export for RE_1.xlsx', sheet = i) %>%
+    mutate_if(is.numeric, funs(replace_na(., 0)))%>%
+    slice(-1) %>% select(Exporters,`Exported value in 2020`) %>%
+    mutate(idx = paste0(i,'_product_',Exporters))
+
+  tb = tb %>% bind_rows(tbb)
+  rm(tbb)
+}
+for(j in 1:7){
+  tbb = read_excel('data/export for RE_2.xlsx', sheet = j) %>%
+    mutate_if(is.numeric, funs(replace_na(., 0)))%>%
+    slice(-1) %>% select(Exporters,`Exported value in 2020`) %>%
+    mutate(idx = paste0(j+10,'_product_',Exporters))
+
+  tb = tb %>% bind_rows(tbb)
+  rm(tbb)
+}
+
+tb = tb %>% 
+  group_by(Exporters) %>% summarize(ex_value = sum(`Exported value in 2020`)) %>%
+  arrange(desc(ex_value))
+
+tb %>%
+  slice(1:20) %>%
+  ggplot() + aes(Exporters, ex_value) + geom_col() +
+  labs(title = '2020年前20大綠能商品出口國')
+
+tb %>%
+  slice(1:10) %>%
+  ggplot() + aes(x = '',y= ex_value, fill = Exporters) + geom_bar(width = 1, stat = "identity", position = "dodge") +
+   # coord_polar("y", start=0)+
+  labs(title = '2020年 前10大綠能商品出口國', 
+       subtitle = "按17項商品之總出口值（千美元）排序",
+       x = NULL, y = NULL)
+  
+tb %>%
+  kable('html') 
+rm(tb)
+```
+
+`單位`: 千美元
+
+### 接著看主要國家的國家綠能商品出口值年趨勢
+
+-   CN, HK, GR 是前三大綠能類商品出口國
+
+-   只有中國的綠色能源出口產值增加，是否`只是整體總產出增加`？
+
+```{r, echo=F}
+tb = tibble()
+
+for(i in 1: 10){
+  a=read_excel('data/export for RE_1.xlsx', sheet = i) %>%
+    mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+    filter(Exporters %in% c('China', 'Hong Kong, China', 'Germany')) %>%
+    gather('year', 'ex_value', 2:21) %>%
+    mutate(year = paste0(i, '_',substr(year, 19,22)))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+
+for(j in 1:7){
+  a=read_excel('data/export for RE_2.xlsx', sheet = j) %>%
+      mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+      filter(Exporters %in% c('China', 'Hong Kong, China', 'Germany')) %>%
+      gather('year', 'ex_value', 2:21) %>%
+      mutate(year = paste0(j+10, '_',substr(year, 19,22)))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+
+set.seed(1213)
+sample(1:17,2)
+tb %>%
+  #mutate(year = as.numeric(year)) %>% 
+  filter(str_detect(year, '2_')) %>%
+  ggplot() + aes(year, ex_value, group = Exporters, color = Exporters) +
+  geom_line(linetype = "dashed",size=1) +
+  geom_point(shape = 22, size = 3, fill = "white") +
+  labs(title = '841919 商品別')
+
+tb %>%
+  #mutate(year = as.numeric(year)) %>% 
+  filter(str_detect(year, '8_')) %>%
+  ggplot() + aes(year, ex_value, group = Exporters, color = Exporters) +
+  geom_line(linetype = "dashed",size=1) +
+  geom_point(shape = 22, size = 3, fill = "white")+
+  labs(title = '850680 商品別')
+
+tb %>%
+  mutate(year = str_extract(year, '_\\d+')) %>%
+  mutate(year = str_extract(year, '\\d+')) %>%
+  group_by(Exporters, year) %>% summarise(ex_value = sum(ex_value)) %>%
+  ggplot() + aes(year, ex_value, group = Exporters, color = Exporters) +
+  geom_line(linetype = "dashed",size=1) +
+  geom_point(shape = 22, size = 3, fill = "white")+
+  labs(title = '綠色能源總出口值趨勢',
+       subtitle = "橫軸為該年度產品出口值（千美元）", 
+       x = NULL, y = NULL)
+
+rm(tb)
+```
+
+### 不同國家的主要出口品項(2020)
+
+這邊取前五個商品
+
+```{r, echo=F}
+tb = tibble()
+
+for(i in 1: 10){
+  a=read_excel('data/export for RE_1.xlsx', sheet = i) %>%
+      slice(-1) %>%
+      mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+      gather('year', 'ex_value', 2:21) %>%
+      mutate(pd = pd[i]) %>%
+      mutate(year = substr(year, 19,22))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+
+for(j in 1:7){
+  a=read_excel('data/export for RE_2.xlsx', sheet = j) %>%
+      slice(-1) %>%
+      mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+      gather('year', 'ex_value', 2:21) %>%
+      mutate(pd=pd[j+10])%>%
+      mutate(year = substr(year, 19,22))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+
+tb %>%
+  filter(year == '2020') %>%
+  #mutate(pd = str_extract(pd, '\\d+')) %>%
+  spread(pd, ex_value) %>%
+  # slice(1:25) %>%
+  kable('html')
+
+ct =  c('China', 'Hong Kong, China', 'Germany')
+tb %>%
+  filter(year == '2020') %>%
+  filter(Exporters == ct[1]) %>%
+  arrange(desc(ex_value)) %>% slice(1:5) %>% bind_rows(
+tb %>%
+  filter(year == '2020') %>%
+  filter(Exporters == ct[2]) %>%
+  arrange(desc(ex_value))%>% slice(1:5)
+) %>% bind_rows(
+tb %>%
+  filter(year == '2020') %>%
+  filter(Exporters == ct[3]) %>%
+  arrange(desc(ex_value))%>% slice(1:5)
+) %>%
+  ggplot() + aes(Exporters,ex_value, fill=pd) +
+  geom_bar(width = 0.8, stat = "identity",position='dodge') +
+  labs(title = '出口大國的主要出口品項')
+  
+rm(tb, ct)
+```
+
+### 以產品為單位做 綠能商品出口值分析
+
+不同項目產品的產值比較:呈現17個商品在2011-2020的出口趨勢
+
+```{r, echo = F}
+
+tb = tibble()
+
+for(i in 1: 10){
+  a=read_excel('data/export for RE_1.xlsx', sheet = i) %>%
+      slice(1)%>%select(12:21)%>%
+      gather('year', 'ex_value', 1:10) %>%
+      mutate(prod = pd[i]) %>%
+      mutate(year = substr(year, 19,22))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+
+for(j in 1:7){
+  a=read_excel('data/export for RE_2.xlsx', sheet = j) %>%
+      slice(1)%>%select(12:21)%>%
+      gather('year', 'ex_value', 1:10) %>%
+      mutate(prod = pd[j+10]) %>%
+      mutate(year = substr(year, 19,22))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+
+tb %>%
+  ggplot() + aes(year, ex_value, group = prod, color = prod) +
+  geom_line(linetype = "dashed",size=1) +
+  geom_point(shape = 22, size = 3, fill = "white")+
+  labs(title = '綠色能源產品之出口趨勢', 
+       subtitle = "橫軸為該年度產品出口值（千美元）", 
+       x = NULL, y = NULL)
+
+rm(tb)
+```
+
+### 不同國家出口同一項商品的比較
+
+`901380`, `854140`
+
+```{r, echo=F}
+read_excel('data/export for RE_2.xlsx', sheet = 3) %>%
+    slice(-1)%>%select(1,12:21)%>%
+    gather('year', 'ex_value', 2:11) %>%
+    mutate(year = substr(year, 19,22)) %>%
+  filter(year == '2018') %>% arrange(desc(ex_value)) %>%
+  slice(1:10) %>%
+  ggplot()+aes(x = '',y= ex_value, fill = Exporters) + geom_bar(width = 1, stat = "identity") +
+   coord_polar("y", start=0)+
+  labs(title = '2018年前10大綠能商品, 854140, 出口國圓餅圖')
+
+read_excel('data/export for RE_2.xlsx', sheet = 5) %>%
+    slice(-1)%>%select(1,12:21)%>%
+    gather('year', 'ex_value', 2:11) %>%
+    mutate(year = substr(year, 19,22)) %>%
+  filter(year == '2018') %>% arrange(desc(ex_value)) %>%
+  slice(1:10) %>%
+  ggplot()+aes(x = '',y= ex_value, fill = Exporters) + geom_bar(width = 1, stat = "identity") +
+   coord_polar("y", start=0)+
+  labs(title = '2018年前10大綠能商品, 901380, 出口國圓餅圖')
+```
+
+## import
+
+### 年趨勢
+
+```{r, echo=F}
+im_vl = numeric()
+for(i in 1: 10){
+  import = read_excel('data/import for RE_1.xlsx', sheet = i) 
+  import_value = import %>% 
+    slice(1) %>% select(-1) %>%
+    gather('year', 'aggregate_im_value', 1:20) %>%
+    mutate(year = substr(year, 19,22)) %>% pull(aggregate_im_value)
+  if(i == 1){im_vl = import_value}
+  else{im_vl = im_vl + import_value}
+}
+for(j in 1: 7){
+  import = read_excel('data/import for RE_2.xlsx', sheet = j) 
+  import_value = import %>% 
+    slice(1) %>% select(-1) %>%
+    gather('year', 'aggregate_im_value', 1:20) %>%
+    mutate(year = substr(year, 19,22)) %>% pull(aggregate_im_value)
+  im_vl = im_vl + import_value
+}
+tibble(year = as.character(2001:2020), im_value = im_vl) %>%
+  ggplot() + aes(x = year, y= im_value) + geom_col() +
+  labs(title = '綠色商品全球進口值趨勢')
+rm(import, import_value, im_value)
+```
+
+### 以國家為單位做 綠能商品 進口分析
+
+```{r, echo = F}
+tb = tibble()
+
+for(i in 1:10){
+  tbb = read_excel('data/import for RE_1.xlsx', sheet = i) %>%
+    mutate_if(is.numeric, funs(replace_na(., 0)))%>%
+    slice(-1) %>% select(Importers,`Imported value in 2020`) %>%
+    mutate(idx = paste0(i,'_product_',Importers))
+
+  tb = tb %>% bind_rows(tbb)
+  rm(tbb)
+}
+for(j in 1:7){
+  tbb = read_excel('data/import for RE_2.xlsx', sheet = j) %>%
+    mutate_if(is.numeric, funs(replace_na(., 0)))%>%
+    slice(-1) %>% select(Importers,`Imported value in 2020`) %>%
+    mutate(idx = paste0(j+10,'_product_',Importers))
+
+  tb = tb %>% bind_rows(tbb)
+  rm(tbb)
+}
+
+tb = tb %>% 
+  group_by(Importers) %>% summarize(im_value = sum(`Imported value in 2020`)) %>%
+  arrange(desc(im_value))
+
+tb %>%
+  slice(1:20) %>%
+  ggplot() + aes(Importers, im_value) + geom_col() +
+  labs(title = '2020年前20大綠能商品進口國')
+
+tb %>%
+  slice(1:10) %>%
+  ggplot() + aes(x = '',y= im_value, fill = Importers) + geom_bar(width = 1, stat = "identity", position = "dodge") +
+   # coord_polar("y", start=0)+
+  labs(title = '2020年 前10大綠能商品進口國',
+       subtitle = "按17項商品之總出口值（千美元）排序",
+       x = NULL, y = NULL)
+  
+tb %>%
+  # slice(1:25) %>%
+  kable('html') 
+rm(tb, tbb)
+```
+
+### 主要國家綠能商品進口年趨勢
+
+```{r, echo=F}
+tb = tibble()
+
+for(i in 1: 10){
+  a=read_excel('data/import for RE_1.xlsx', sheet = i) %>%
+    mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+    filter(Importers %in% c('China', 'Hong Kong, China', 'United States of America')) %>%
+    gather('year', 'im_value', 2:21) %>%
+    mutate(year = paste0(i, '_',substr(year, 19,22)))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+
+for(j in 1:7){
+  a=read_excel('data/import for RE_2.xlsx', sheet = j) %>%
+      mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+      filter(Importers %in% c('China', 'Hong Kong, China', 'United States of America')) %>%
+      gather('year', 'im_value', 2:21) %>%
+      mutate(year = paste0(j+10, '_',substr(year, 19,22)))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+
+set.seed(1213)
+sample(1:17,2)
+tb %>%
+  #mutate(year = as.numeric(year)) %>% 
+  filter(str_detect(year, '2_')) %>%
+  ggplot() + aes(year, im_value, group = Importers, color = Importers) +
+  geom_line(linetype = "dashed",size=1) +
+  geom_point(shape = 22, size = 3, fill = "white") +
+  labs(title = '841919 商品別 進口')
+
+tb %>%
+  #mutate(year = as.numeric(year)) %>% 
+  filter(str_detect(year, '8_')) %>%
+  ggplot() + aes(year, im_value, group = Importers, color = Importers) +
+  geom_line(linetype = "dashed",size=1) +
+  geom_point(shape = 22, size = 3, fill = "white")+
+  labs(title = '850680 商品別 進口')
+
+tb %>%
+  mutate(year = str_extract(year, '_\\d+')) %>%
+  mutate(year = str_extract(year, '\\d+')) %>%
+  group_by(Importers, year) %>% summarise(im_value = sum(im_value)) %>%
+  ggplot() + aes(year, im_value, group = Importers, color = Importers) +
+  geom_line(linetype = "dashed",size=1) +
+  geom_point(shape = 22, size = 3, fill = "white")+
+  labs(title = '全部綠色能源 進口')
+
+rm(tb, tbb)
+```
+
+### 不同國家 主要進口品項
+
+```{r, echo=F}
+tb = tibble()
+
+for(i in 1: 10){
+  a=read_excel('data/import for RE_1.xlsx', sheet = i) %>%
+      slice(-1) %>%
+      mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+      gather('year', 'im_value', 2:21) %>%
+      mutate(pd = pd[i]) %>%
+      mutate(year = substr(year, 19,22))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+
+for(j in 1:7){
+  a=read_excel('data/import for RE_2.xlsx', sheet = j) %>%
+      slice(-1) %>%
+      mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+      gather('year', 'im_value', 2:21) %>%
+      mutate(pd=pd[j+10])%>%
+      mutate(year = substr(year, 19,22))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+
+tb %>%
+  filter(year == '2020') %>%
+  #mutate(pd = str_extract(pd, '\\d+')) %>%
+  spread(pd, im_value) %>%
+  # slice(1:25) %>%
+  kable('html')
+
+ct =  c('China', 'Hong Kong, China', 'United States of America')
+tb %>%
+  filter(year == '2020') %>%
+  filter(Importers == ct[1]) %>%
+  arrange(desc(im_value)) %>% slice(1:5) %>% bind_rows(
+tb %>%
+  filter(year == '2020') %>%
+  filter(Importers == ct[2]) %>%
+  arrange(desc(im_value))%>% slice(1:5)
+) %>% bind_rows(
+tb %>%
+  filter(year == '2020') %>%
+  filter(Importers == ct[3]) %>%
+  arrange(desc(im_value))%>% slice(1:5)
+) %>%
+  ggplot() + aes(Importers,im_value, fill=pd) +
+  geom_bar(width = 0.8, stat = "identity",position='dodge') +
+  labs(title = '進口大國主要進口產品',
+       subtitle = "橫軸為2020年產品進口值（千美元）", 
+       x = NULL, y = NULL)
+  
+rm(tb, ct)
+```
+
+### 按產品為單位分析 綠能商品 進口值
+
+```{r, echo = F}
+tb = tibble()
+
+for(i in 1: 10){
+  a=read_excel('data/import for RE_1.xlsx', sheet = i) %>%
+      slice(1)%>%select(12:21)%>%
+      gather('year', 'im_value', 1:10) %>%
+      mutate(prod = pd[i]) %>%
+      mutate(year = substr(year, 19,22))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+
+for(j in 1:7){
+  a=read_excel('data/import for RE_2.xlsx', sheet = j) %>%
+      slice(1)%>%select(12:21)%>%
+      gather('year', 'im_value', 1:10) %>%
+      mutate(prod = pd[j+10]) %>%
+      mutate(year = substr(year, 19,22))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+
+tb %>%
+  ggplot() + aes(year, im_value, group = prod, color = prod) +
+  geom_line(linetype = "dashed",size=1) +
+  geom_point(shape = 22, size = 3, fill = "white")+
+  labs(title = '綠色能源產品之進口趨勢',
+       subtitle = "橫軸為該年度產品進口值（千美元）", 
+       x = NULL, y = NULL)
+rm(tb)
+```
+
+### 不同國家進口同一項商品之貢獻
+
+```{r, echo=F}
+read_excel('data/import for RE_2.xlsx', sheet = 3) %>%
+    slice(-1)%>%select(1,12:21)%>%
+    gather('year', 'im_value', 2:11) %>%
+    mutate(year = substr(year, 19,22)) %>%
+  filter(year == '2018') %>% arrange(desc(im_value)) %>%
+  slice(1:10) %>%
+  ggplot()+aes(x = '',y= im_value, fill = Importers) + geom_bar(width = 1, stat = "identity") +
+   coord_polar("y", start=0)+
+  labs(title = '2018年前10大綠能商品, 854140, 進口國圓餅圖')
+
+read_excel('data/import for RE_2.xlsx', sheet = 5) %>%
+    slice(-1)%>%select(1,12:21)%>%
+    gather('year', 'im_value', 2:11) %>%
+    mutate(year = substr(year, 19,22)) %>%
+  filter(year == '2018') %>% arrange(desc(im_value)) %>%
+  slice(1:10) %>%
+  ggplot()+aes(x = '',y= im_value, fill = Importers) + geom_bar(width = 1, stat = "identity") +
+   coord_polar("y", start=0)+
+  labs(title = '2018年前10大綠能商品, 901380, 進口國圓餅圖')
+```
+
+前10大綠能商品出口 vs 進口 的國家
+
+可觀察到，前十大的綠能產品進出口國大相徑庭，或許討論`進口`比較能評估`低碳`經濟帶來的效益。
+
+-   前10大綠能進口國有`荷蘭`、`波蘭`、`德國`
+
+## 碳關稅/ 碳定價(for green energy)
+
+進出口的資料只有`再生能源類`，其他類只有aggregate statistic。
+
+由於各國的關稅相差頗大，且沒有觀察到太大的降幅，因此無法用實證資料驗證關稅降低後帶來的進出口量。
+
+另外，五大類綠色商品的分類標準不一致。像是在`HS code.pdf`中，
+`853120`是綠色能源類；在16年5月後，該商品又被分類為節能設備類。
+
+-   為簡化分析，本次的分類標準用的是16年以前的分類準則。
+
+-   此處直接使用`再生能源商品在2016年MFN的平均關稅`，搭配`進口`資料。
+
+-   `目標`：關稅降到零是否會有效增加綠色商品的進口量
+
+
+## 碳排放(產品碳含量)
+
+```{r, echo=F}
+emission = read_dta('data/DATA_20200711.dta') %>%
+  select(country, year, CO2inLUCF_A, CO2exLUCF_A, CO2inLULUCF_B, CO2exLULUCF_B, CO2exLULUCF_C, EPE_ex, EPE_im, GElectron_ex, GElectron_im, GEnergy_ex, GEnergy_im, GM_ex, GM_im, LCT_ex, LCT_im, GDP_current) 
+
+emission %>%
+  drop_na(CO2exLULUCF_C) %>%
+  group_by(country) %>% summarise(em = sum(CO2exLULUCF_C)) %>%
+  arrange(desc(em)) %>% slice(1:10) %>%
+  ggplot() + aes(x = '', y=em, fill = country) + geom_bar(width = 1,  stat = 'identity', position = 'dodge') + 
+  labs(title = 'CO2 排放量, 前10主要排放國')
+
+emission %>%
+  drop_na(CO2exLULUCF_C) %>%
+  group_by(year) %>% summarise(em = sum(CO2exLULUCF_C)) %>%
+  filter(year %in% c(1997:2020)) %>%
+  ggplot() + aes(x = year, y=em) + geom_line()+ 
+  labs(title = '全球 CO2 排放量, 1997以後趨勢')
+```
+
+### 關稅對進出口的影響
+
+-   `方法`：計算出關稅對出口國的負擔，並計算該`成本佔出口國產值`的比例。
+
+-   並且檢視關稅大小和進出口量的相關性散佈圖
+
+```{r, echo=F, message=F}
+# read_excel('data/export for RE_1.xlsx', sheet = 1) %>%
+#   select(1, 21) %>%
+#   rename(x= Exporters, ex_value = `Exported value in 2020`) %>%
+#   mutate(
+#     country = case_when(
+#       x == 'World' ~ 'W',
+#     )
+#       )
+tb = tibble()
+
+for(i in 1:10){
+  a = read_excel('data/export for RE_1.xlsx', sheet = i) %>%
+    select(1, 21) 
+  colnames(a)[2] <- pd[i]
+  if(i == 1){tb = a}
+  else{
+    tb = tb %>% full_join(a, by = 'Exporters')
+  }
+  rm(a)
+}
+for(j in 1:7){
+  a = read_excel('data/export for RE_2.xlsx', sheet = j) %>%
+    select(1, 21) 
+  colnames(a)[2] <- pd[j+10]
+  tb = tb %>% full_join(a, by = 'Exporters')
+  rm(a)
+}
+tb %>%  kable('html')
+
+########
+tb = tb %>%
+  mutate_if(is.numeric, funs(replace_na(., 0)))
+tariff = tariff/sum(tariff)
+
+cost = numeric()
+total = numeric()
+for(i in 2:18){
+  tb_vec = tb %>% select(i) %>% pull()
+  if(i == 2){cost = tb_vec*tariff[i-1]
+             total = tb_vec}
+  else{cost = cost + tb_vec*tariff[i-1]
+       total = total + tb_vec}
+}
+
+tb %>% mutate(cost = cost, total = total) %>%
+  select(Exporters, cost, total) %>% arrange(desc(total)) %>%
+  slice(1:10) %>% 
+  gather('sort', 'value', 2:3) %>%
+  ggplot() + aes(x = Exporters, y = value, fill = sort) + geom_bar(stat = 'identity', position = 'fill') +
+  labs(title = '關稅成本佔綠能商品出口值的比例')
+
+tb %>% mutate(cost = cost, total = total) %>%
+  select(Exporters, cost, total) %>% arrange(desc(total)) %>%
+  slice(1:10) %>% 
+  gather('sort', 'value', 2:3) %>%
+  ggplot() + aes(x = Exporters, y = value, fill = sort) + geom_bar(stat = 'identity', position = 'stack') +
+  labs(title = '關稅成本佔綠能商品出口值的絕對值')
+
+rm(tb, cost, total, tb_vec)
+```
+
+`公式` :  個別hs6產品乘以標準化過後的關稅，再除以該商品總出口值。
+```{r, echo = F}
+# nba %>%
+#   select(ast, fg, trb) %>%
+#   ggpairs()
+
+country_99 = read_excel('data/ge_trf_99.xlsx', sheet = 1) %>%
+  pull(`全球其他99國`)
+country_70 = read_excel('data/ge_trf_99.xlsx', sheet = 1) %>%
+  slice(1:70) %>% pull(`70國`)
+
+tb = tibble()
+for(i in ((1:99)[-81])){
+  df = read_excel('data/ge_trf_99.xlsx', sheet = i+3) %>%
+    select(HS6, `2016`) %>% filter(HS6 %in% pd) 
+  colnames(df)[2] <- country_99[i]
+  if(i == 1){tb = df}
+  else{tb = tb %>% left_join(df, by = 'HS6')}
+  rm(df)
+}
+
+a = 1:70
+a= setdiff(a, c(8,29,61))
+for(j in a){
+  df = read_excel('data/ge_trf_70.xlsx', sheet = j+3) %>%
+    select(HS6, `2016`) %>% filter(HS6 %in% pd) 
+  colnames(df)[2] <- country_70[j]
+  tb = tb %>% left_join(df, by = 'HS6')
+  rm(df)
+}
+
+tbb = tb %>% 
+  gather('country', 'trf', 2:166) %>%
+  mutate_at('trf', as.numeric) %>% drop_na(trf) %>%
+  group_by(country) %>% summarise(tariff = sum(trf))
+
+tb = tibble()
+for(i in 1: 10){
+  a=read_excel('data/import for RE_1.xlsx', sheet = i) %>%
+      slice(-1) %>%
+      mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+      gather('year', 'im_value', 2:21) %>%
+      mutate(pd = paste0(i, '_')) %>%
+      mutate(year = substr(year, 19,22))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+
+for(j in 1:7){
+  a=read_excel('data/import for RE_2.xlsx', sheet = j) %>%
+      slice(-1) %>%
+      mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+      gather('year', 'im_value', 2:21) %>%
+      mutate(pd=paste0(j+10, '_'))%>%
+      mutate(year = substr(year, 19,22))
+  tb = tb %>% bind_rows(a)
+  rm(a)
+}
+tb %>% filter(year == '2016') %>%
+  group_by(Importers) %>% summarise(im_vl = sum(im_value)) %>%
+  inner_join(tbb, by = c('Importers' = 'country')) %>% select(-1) %>%
+  ggpairs()
+
+```
+
+
+### 關稅和排放量的關係
+```{r, echo=F}
+emission %>% filter(country %in% tb$Importers) %>%
+  select(country, year, CO2exLULUCF_C) %>%
+  drop_na(CO2exLULUCF_C) %>% filter(year == '2016') %>%
+  inner_join(tbb, by = 'country') %>%
+  select(CO2exLULUCF_C, tariff) %>% ggpairs()
+```
+
+## 排碳大國是否進口較少的綠能商品？
+```{r, echo= F}
+tb=tb %>% filter(year == '2016') %>%
+  group_by(Importers) %>% summarise(im_vl = sum(im_value))
+emission %>% filter(country %in% tb$Importers) %>%
+  select(country, year, CO2exLULUCF_C) %>%
+  drop_na(CO2exLULUCF_C) %>% filter(year == '2016') %>%
+  inner_join(tb, by = c('country'= 'Importers')) %>%
+  select(CO2exLULUCF_C, im_vl) %>% ggpairs()
+```
+
+`延伸研究`： 出口綠能產值佔GDP份額。
+
+ex. 印尼、印度GDP在全球榜上有名，出口之綠能產值卻排到40名以後。
+
+# Summary
+
+`目標`：關稅降到零是否會有效增加綠色商品的進出口量，以及顯著的降低碳排放量?
+
+- 綠色商品的全球出口趨勢自00年開始上升，在12年達到高峰，之後持平
+
+- 中國、香港、德國是綠色能源商品的主要出口國；中、香港、美是主要的進口國
+
+- 901380, 854140是出口值最多的綠能商品，超過50%
+
+- 綠能商品的主要出口國和進口國不一致，其中進口國多出了歐盟國（波蘭、德國、荷蘭），證明`歐盟的環保政策不是純為貿易手段`！
+
+- `排放量和關稅的關聯性`很高！ 16年後簽了排碳協議的污染大國 可能會進口更多的綠能商品。
+
+# 值得討論的問題
+
+- 或許是地區貿易夥伴的協議(東協/ APEC...) 是影響排碳的誘因，或許加入dummy variable會有進一步發現。
+
+- 841919 為何10年後掉下？ 台灣出口該商品的競爭力下降了嗎？
+
+- 排放量應用GHG而非CO2，因CO2只佔溫室氣體總量的26%
+
+- 本研究中，關稅成本可能沒有代表性
+
+`經濟意義`:商品流的方向，主要出口國到主要進口國

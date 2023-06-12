@@ -1,0 +1,416 @@
+---
+title: "綠能商品_關稅對進口之影響（panel data）（按產品別）"
+author: "Duke Liu"
+date: "2021/8/25"
+output:
+  prettydoc::html_pretty:
+    theme: leonids
+    highlight: github
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE, message=F}
+knitr::opts_chunk$set(echo = F)
+library(tidyverse)
+# library(magrittr)
+library(plm)
+# library(kableExtra)
+# library(GGally)
+# library(lmtest)
+# library(vroom)
+library(readxl)
+library(jtools)
+library(showtext)
+showtext_auto()
+```
+
+
+```{r}
+load('0823.rda')
+rm(emission, Export, Import, Tariff)
+data = data %>% select(1:5, co2, ghg, GDP_current, FTD, country_EU, country_APEC, country_OPEC) %>%
+  mutate(netGE = ex_vl - im_vl)
+# data = data %>% mutate(tariff = 100*tariff)
+# data <- pdata.frame(data,c("country","year"))
+```
+
+```{r, eval=F, warning=F}
+Import = tibble()
+for(i in 1: 10){
+  pd = excel_sheets("data/import for RE_1.xlsx")[i]
+  a=read_excel('data/import for RE_1.xlsx', sheet = i) %>%
+    slice(-1) %>%
+    filter(Importers %in% unique(data$country)) %>%
+    gather('year', 'im_value', 2:21) %>%
+    mutate(year = substr(year, 19,22),
+           product = pd)
+  Import = Import %>% bind_rows(a)
+  rm(a, pd)
+}
+for(j in 1:7){
+  pd = excel_sheets("data/import for RE_2.xlsx")[j]
+  a=read_excel('data/import for RE_2.xlsx', sheet = j) %>%
+    slice(-1) %>%
+    filter(Importers %in% unique(data$country)) %>%
+    gather('year', 'im_value', 2:21) %>%
+    mutate(year = substr(year, 19,22),
+           product = pd)
+  Import = Import %>% bind_rows(a)
+  rm(a)
+}
+product = c(excel_sheets("data/import for RE_1.xlsx"), 
+            excel_sheets("data/import for RE_2.xlsx"))
+
+# tariff raw
+country_99 = read_excel('data/ge_trf_99.xlsx', sheet = 1) %>%
+  pull(`全球其他99國`)
+country_70 = read_excel('data/ge_trf_99.xlsx', sheet = 1) %>%
+  slice(1:70) %>% pull(`70國`)
+Tariff = tibble()
+for(i in ((1:99)[-81])){
+  df = read_excel('data/ge_trf_99.xlsx', sheet = i + 3) %>%
+    filter(HS6 %in% product) %>% select(HS6, 6:25) %>%
+    gather('year', 'tariff', 2:21) %>%
+    mutate(country = country_99[i]) %>%
+    mutate_at('tariff', as.numeric)
+  Tariff = Tariff %>% bind_rows(df)
+  rm(df)
+}
+a = 1:70
+a= setdiff(a, c(8,29,61))
+for(j in a){
+  df = read_excel('data/ge_trf_70.xlsx', sheet = j + 3) %>%
+    filter(HS6 %in% product) %>% select(HS6, 6:25) %>%
+    gather('year', 'tariff', 2:21) %>%
+    mutate(country = country_70[j]) %>%
+    mutate_at('tariff', as.numeric)
+  Tariff = Tariff %>% bind_rows(df)
+  rm(df)
+}
+rm(country_99, country_70,a)
+Tariff = Tariff %>% filter(country %in% unique(data$country))
+```
+
+# 先看看關稅對進口的影響
+
+進口資料只有`17項`商品，為舊版定義之**再生能源 & 節能設備**類
+
+```{r}
+load('0825.rda')
+product = c(excel_sheets("data/import for RE_1.xlsx"), 
+            excel_sheets("data/import for RE_2.xlsx"))
+```
+
+## model
+
+這邊跑兩種模型，分別是時間的fix effect和個體的fix effect 
+
+### loop with reduced model
+```{r, warning=F}
+tb = tibble()
+sig = c()
+for(i in 1:17){
+  ii = Import %>% filter(product %in% product[i]) %>% select(-product)
+  jj = Tariff %>% filter(HS6 %in% product[i]) %>% select(-HS6) %>%
+    mutate(year = substr(year, 1,4)) %>%
+    left_join(ii, by= c("country" = "Importers", "year" = "year")) %>%
+    mutate_at('year', as.numeric)
+  pd = data %>% select(-im_vl, -tariff) %>%
+    left_join(jj, by= c("country" = "country", "year" = "year")) %>%
+    mutate(tariff = tariff*100)
+  rm(ii, jj)
+  pd = pdata.frame(pd, c('country', 'year'))
+  
+  fe = plm(im_value ~ tariff + co2, data = pd, model='within', effect='individual')
+  tb = tb %>% bind_rows(
+    tibble(tariff = fe$coefficients[1],
+           co2 = fe$coefficients[2],
+           product = product[i])
+  )
+  if(summary(fe)$coefficients[,4][1] < .05){sig = c(sig, product[i])}
+}
+rm(fe, i, pd)
+
+tb %>% gather('variable', 'value', 1:2) %>%
+  ggplot() + aes(x = variable, y = value, color = product) +
+  geom_jitter() + coord_flip() +
+  theme_bw() +
+  labs(title = '個體固定效果模型 係數比較', 
+       subtitle = 'reduced model（點估計，無標準誤）')
+cat('降低關稅有用的產品為（.05 confidence level）:', sig)
+
+sig = c()
+tb = tibble()
+for(i in 1:17){
+  ii = Import %>% filter(product %in% product[i]) %>% select(-product)
+  jj = Tariff %>% filter(HS6 %in% product[i]) %>% select(-HS6) %>%
+    mutate(year = substr(year, 1,4)) %>%
+    left_join(ii, by= c("country" = "Importers", "year" = "year")) %>%
+    mutate_at('year', as.numeric)
+  pd = data %>% select(-im_vl, -tariff) %>%
+    left_join(jj, by= c("country" = "country", "year" = "year")) %>%
+    mutate(tariff = tariff*100)
+  rm(ii, jj)
+  pd = pdata.frame(pd, c('country', 'year'))
+  
+  fe = plm(im_value ~ tariff + co2, data = pd, model='within', effect='time')
+  tb = tb %>% bind_rows(
+    tibble(tariff = fe$coefficients[1],
+           co2 = fe$coefficients[2],
+           product = product[i])
+  )
+  if(summary(fe)$coefficients[,4][1] < .05){sig = c(sig, product[i])}
+}
+rm(fe, i, pd)
+
+tb %>% gather('variable', 'value', 1:2) %>%
+  ggplot() + aes(x = variable, y = value, color = product) +
+  geom_jitter() + coord_flip() +
+  theme_bw() +
+  labs(title = '時間固定效果模型 係數比較', 
+       subtitle = 'reduced model（點估計，無標準誤）')
+cat('降低關稅有用的產品為（.05 confidence level）:', sig)
+rm(tb, sig)
+```
+
+### loop with full model
+
+這邊有加入apec等dummy， 所以可以看看隨機效果的影響。
+（也許後續能試試 `mix effect model`）
+
+random effect 會drop 掉500多個missing 的obs
+```{r, warning=F}
+sig = c()
+tb = tibble()
+for(i in 1:17){
+  ii = Import %>% filter(product %in% product[i]) %>% select(-product)
+  jj = Tariff %>% filter(HS6 %in% product[i]) %>% select(-HS6) %>%
+    mutate(year = substr(year, 1,4)) %>%
+    left_join(ii, by= c("country" = "Importers", "year" = "year")) %>%
+    mutate_at('year', as.numeric)
+  pd = data %>% select(-im_vl, -tariff) %>%
+    left_join(jj, by= c("country" = "country", "year" = "year")) %>%
+    mutate(tariff = tariff*100,
+           GDP_current = GDP_current/10^7)
+  rm(ii, jj)
+  pd = pdata.frame(pd, c('country', 'year'))
+  
+  fe = plm(im_value ~ tariff + co2 + GDP_current + FTD + country_APEC + country_OPEC + country_EU, data = pd, model='within', effect='individual')
+  tb = tb %>% bind_rows(
+    tibble(tariff = fe$coefficients[1],
+           co2 = fe$coefficients[2],
+           gdp = fe$coefficients[3], 
+           ftd = fe$coefficients[4],
+           product = product[i])
+  )
+  if(summary(fe)$coefficients[,4][1] < .05){sig = c(sig, product[i])} 
+}
+rm(fe, i, pd)
+
+tb %>% gather('variable', 'value', 1:4) %>%
+  ggplot() + aes(x = variable, y = value, color = product) +
+  geom_jitter() + coord_flip() +
+  theme_bw() +
+  labs(title = '個體固定效果模型 係數比較', 
+       subtitle = 'full model（關稅有*100,GDP有除以10million）')
+cat('降低關稅有用的產品為（.05 confidence level）:', sig)
+
+sig = c()
+tb = tibble()
+for(i in 1:17){
+  ii = Import %>% filter(product %in% product[i]) %>% select(-product)
+  jj = Tariff %>% filter(HS6 %in% product[i]) %>% select(-HS6) %>%
+    mutate(year = substr(year, 1,4)) %>%
+    left_join(ii, by= c("country" = "Importers", "year" = "year")) %>%
+    mutate_at('year', as.numeric)
+  pd = data %>% select(-im_vl, -tariff) %>%
+    left_join(jj, by= c("country" = "country", "year" = "year")) %>%
+    mutate(tariff = tariff*100, GDP_current = GDP_current/10^7) %>%
+    drop_na()
+  rm(ii, jj)
+  pd = pdata.frame(pd, c('country', 'year'))
+  
+  fe = plm(im_value ~ tariff + co2 + GDP_current + FTD + country_APEC + country_OPEC + country_EU, data = pd, model='random')
+  tb = tb %>% bind_rows(
+    tibble(random_intercept = fe$coefficients[1],
+           tariff = fe$coefficients[2],
+           co2 = fe$coefficients[3],
+           gdp = fe$coefficients[4],
+           ftd = fe$coefficients[5],
+           APEC = fe$coefficients[6],
+           OPEC = fe$coefficients[7],
+           EU = fe$coefficients[8],
+           product = product[i])
+  )
+  if(summary(fe)$coefficient[,4][2] < .1){sig = c(sig, product[i])}
+}
+rm(fe, i, pd)
+
+tb %>% gather('variable', 'value', 1:8) %>%
+  ggplot() + aes(x = variable, y = value, color = product) +
+  geom_jitter() + coord_flip() +
+  theme_bw() +
+  labs(title = '隨機效果模型 係數比較', 
+       subtitle = 'full model')
+# `%not_in%` <- purrr::negate(`%in%`)
+tb %>% select(-EU, -APEC, -OPEC) %>%gather('variable', 'value', 1:5) %>%
+  # filter((sort %in% c('EU', 'APEC', 'OPEC'))) %>%
+  ggplot() + aes(x = variable, y = value, color = product) +
+  geom_jitter() + coord_flip() +
+  theme_bw() +
+  labs(title = '隨機效果模型 係數比較', 
+       subtitle = 'full model(隱藏APEC, OPEC, EU )')
+cat('降低關稅有用的產品為（.1 confidence level）:', sig)
+
+rm(tb, fe,sig)
+```
+
+
+### dummy with reduced model
+
+假設為每個產品的固定效應相同，不切實際。加上dummy的方式無法在panel data模型中進行分析，因為一國一年有超過1筆資料（17筆產品資料）。
+
+且嘗試3- dimension的 panel data後，無法跑模型 ><
+```{r, eval=FALSE}
+tt = Tariff %>% mutate(year = substr(year,1,4)) %>%
+  left_join(Import, by = c("country" = "Importers", "year" = "year",
+                           'HS6' = "product")) %>% drop_na()
+
+dd = data %>% select(-im_vl, -tariff) %>%
+  mutate_at('year', as.character) %>%
+  left_join(tt, by = c("country" = "country", "year" = "year")) 
+dd %>% glimpse()
+
+# for(i in 1:17){
+#   dd = dd %>% mutate(ifelse(HS6 == product[i], 1, 0))
+#   colnames(dd)[14+i] = paste0('product_', product[i])
+# }
+# dd = pdata.frame(dd, c('country', 'year', 'HS6'))
+
+# md = im_value ~ tariff + co2 + product_732190 + product_850164 + product_850231 + product_850239 + product_850300 + product_850490 + product_850680 + product_850690 + product_850720 + product_853120 + product_854110 + product_854140 + product_900190 + product_901380 + product_901390 + product_940540
+# pool1 <- plm(md, data=dd, model='pooling')
+# re1<-plm(md, data=dd, model='random')
+# fe1<-plm(md, data=data, model='within', effect='individual')
+# fe2<-plm(md, data=data, model='within', effect='twoways')
+
+md = im_value ~ tariff + co2
+pool1 = plm(md, data = dd, model= 'pooling')
+
+export_summs(pool1,re1,fe1,fe2,
+          model.names  = c("Pooled OLS","RE","FE-individual","FE-two-ways"))
+rm(tt, dd)
+
+
+```
+
+# 對每項產品而言，降低關稅對APEC/ non APEC國的影響？
+
+```{r, warning=F}
+dd = data %>% mutate(union = ifelse(country_APEC == 1, 1, 0)) %>%
+  select(-country_APEC, -country_EU, -country_OPEC) %>%
+  drop_na()
+
+sig = c()
+tb = tibble()
+for(i in 1:17){
+  ii = Import %>% filter(product %in% product[i]) %>% select(-product)
+  jj = Tariff %>% filter(HS6 %in% product[i]) %>% select(-HS6) %>%
+    mutate(year = substr(year, 1,4)) %>%
+    left_join(ii, by= c("country" = "Importers", "year" = "year")) %>%
+    mutate_at('year', as.numeric)
+  pd = dd  %>% select(-im_vl, -tariff) %>%
+    left_join(jj, by= c("country" = "country", "year" = "year")) %>%
+    mutate(tariff = tariff*100,
+           GDP_current = GDP_current/10^7)
+  rm(ii, jj)
+  pd = pdata.frame(pd, c('country', 'year'))
+  
+  fe = plm(im_value ~ tariff + union, data = pd, model = 'within', 
+           effect = 'individual')
+  tb = tb %>% bind_rows(tibble(
+    product= product[i], 
+   tariff = fe$coefficients[1]
+  ))
+  if(summary(fe)$coefficient[,4] < .05){sig = c(sig, product[i])}
+}
+
+tb %>% #gather('variable', 'value', 1:5) %>%
+  ggplot() + aes(x = product, y = tariff, fill = product) +
+  geom_bar(position = 'dodge', stat = 'identity') + coord_flip() +
+  theme_bw() +
+  labs(title = '個體固定效果模型 關稅係數比較', 
+       subtitle = 'reduced model （固定效果沒有output APEC dummy）')
+cat('關稅影響 顯著的產品別：', sig)
+
+sig = c()
+ap = c()
+tb = tibble()
+for(i in 1:17){
+  ii = Import %>% filter(product %in% product[i]) %>% select(-product)
+  jj = Tariff %>% filter(HS6 %in% product[i]) %>% select(-HS6) %>%
+    mutate(year = substr(year, 1,4)) %>%
+    left_join(ii, by= c("country" = "Importers", "year" = "year")) %>%
+    mutate_at('year', as.numeric)
+  pd = dd  %>% select(-im_vl, -tariff) %>%
+    left_join(jj, by= c("country" = "country", "year" = "year")) %>%
+    mutate(tariff = tariff*100,
+           GDP_current = GDP_current/10^7)
+  rm(ii, jj)
+  pd = pdata.frame(pd, c('country', 'year'))
+  
+  fe = plm(im_value ~ tariff + union, data = pd, model = 'random')
+  tb = tb %>% bind_rows(tibble(
+    product= product[i], 
+    random_intercept = fe$coefficients[1],
+    tariff = fe$coefficients[2],
+    APEC = fe$coefficients[3]
+  ))
+  if(summary(fe)$coefficient[2,4] < .05){sig = c(sig, product[i])}
+  if(summary(fe)$coefficient[3, 4] < .05){ap = c(ap, product[i])}
+}
+
+tb %>% gather('variable', 'value', 2:4) %>%
+  # filter(sort == 'tariff') %>%
+  ggplot() + aes(x = variable, y = value, color = product) +
+  geom_jitter() + coord_flip() +
+  theme_bw() +
+  labs(title = '隨機效果模型 係數比較', 
+       subtitle = 'reduced model')
+cat('關稅影響 顯著的產品別：', sig)
+cat('APEC影響 顯著的產品別：', ap)
+
+rm(dd, pd, tb)
+```
+
+# appendix: 17項產品之 summary statistic
+
+這邊放的是個體固定效應版本的reduced model。
+```{r}
+for(i in 1:17){
+  ii = Import %>% filter(product %in% product[i]) %>% select(-product)
+  jj = Tariff %>% filter(HS6 %in% product[i]) %>% select(-HS6) %>%
+    mutate(year = substr(year, 1,4)) %>%
+    left_join(ii, by= c("country" = "Importers", "year" = "year")) %>%
+    mutate_at('year', as.numeric)
+  pd = data %>% select(-im_vl, -tariff) %>%
+    left_join(jj, by= c("country" = "country", "year" = "year")) %>%
+    mutate(tariff = tariff*100)
+  rm(ii, jj)
+  pd = pdata.frame(pd, c('country', 'year'))
+  
+  fe = plm(im_value ~ tariff + co2, data = pd, model='within', effect='individual')
+  print(product[i])
+  print(summary(fe))
+  cat('\n\n\n\n\n')
+ # if(summary(fe)$coefficients[,4][1] < .05){sig = c(sig, product[i])}
+}
+rm(fe, i, pd)
+
+
+```
+
+# reference
+
+author： Duke Liu **b07801013@g.ntu.edu.tw**

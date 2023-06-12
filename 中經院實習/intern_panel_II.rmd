@@ -1,0 +1,547 @@
+---
+title: "綠能商品_關稅對進口之影響（panel data）（按國家別）"
+author: "Duke Liu"
+date: "2021/8/25"
+output:
+  prettydoc::html_pretty:
+    theme: architect
+    highlight: github
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE, message=F}
+knitr::opts_chunk$set(echo = F)
+# options(readr.show_progress = T)
+library(tidyverse)
+library(magrittr)
+library(plm)
+# library(readxl)
+# library(haven)
+library(kableExtra)
+# library(stargazer)
+library(GGally)
+library(lmtest)
+library(vroom)
+library(jtools)
+library(showtext)
+showtext_auto()
+```
+
+```{r, eval=F}
+Export = tibble()
+for(i in 1:10){
+  a=read_excel('data/export for RE_1.xlsx', sheet = i) %>%
+    slice(-1) %>%
+    #mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+    gather('year', 'ex_value', 2:21) %>%
+    mutate(year = substr(year, 19,22))
+  Export = Export %>% bind_rows(a)
+}
+for(j in 1:7){
+  a=read_excel('data/export for RE_2.xlsx', sheet = j) %>%
+    slice(-1) %>%
+    # mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+    gather('year', 'ex_value', 2:21) %>%
+    mutate(year = substr(year, 19,22))
+  Export = Export %>% bind_rows(a)
+}
+# export = Export %>% 
+#   group_by(Exporters, year) %>% summarise(ex_vl = sum(ex_value))
+rm(a)
+
+
+# tariff raw
+country_99 = read_excel('data/ge_trf_99.xlsx', sheet = 1) %>%
+  pull(`全球其他99國`)
+country_70 = read_excel('data/ge_trf_99.xlsx', sheet = 1) %>%
+  slice(1:70) %>% pull(`70國`)
+Tariff = tibble()
+for(i in ((1:99)[-81])){
+  df = read_excel('data/ge_trf_99.xlsx', sheet = i+3) %>%
+  gather('year', 'tariff', 6:25) %>% 
+  select(year, tariff) %>%
+  mutate_at('tariff', as.numeric) %>% 
+  group_by(year) %>% mutate(result = mean(tariff, na.rm=T)) %>% 
+  distinct(year, .keep_all = T) %>%
+  select(year, result)
+  colnames(df)[2] <- country_99[i]
+  if(i == 1){Tariff = df}
+  else{Tariff = Tariff %>% left_join(df, by = 'year')}
+  rm(df)
+}
+a = 1:70
+a= setdiff(a, c(8,29,61))
+for(j in a){
+  df = read_excel('data/ge_trf_70.xlsx', sheet = j+3) %>%
+  gather('year', 'tariff', 6:25) %>% 
+  select(year, tariff) %>%
+  mutate_at('tariff', as.numeric) %>% 
+  group_by(year) %>% mutate(result = mean(tariff, na.rm=T)) %>% 
+  distinct(year, .keep_all = T) %>%
+  select(year, result)
+  colnames(df)[2] <- country_70[j]
+  Tariff = Tariff %>% left_join(df, by = 'year')
+  rm(df)
+}
+rm(country_99, country_70,a)
+# tariff = Tariff %>% 
+#   gather('country', 'trf', 2:166) %>%
+#   mutate_at('trf', as.numeric) %>% drop_na(trf) 
+#   # group_by(country) %>% summarise(tariff = sum(trf))
+#   # 16 countries out of 165 countries don't have tariff data.
+# rm(Tariff, country_70, country_99, a)
+
+Import = tibble()
+for(i in 1: 10){
+  a=read_excel('data/import for RE_1.xlsx', sheet = i) %>%
+    slice(-1) %>%
+    # mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+    gather('year', 'im_value', 2:21) %>%
+    mutate(year = substr(year, 19,22))
+  Import = Import %>% bind_rows(a)
+  rm(a)
+}
+for(j in 1:7){
+  a=read_excel('data/import for RE_2.xlsx', sheet = j) %>%
+    slice(-1) %>%
+    # mutate_if(is.numeric, funs(replace_na(., 0))) %>%
+    gather('year', 'im_value', 2:21) %>%
+    mutate(year = substr(year, 19,22))
+  Import = Import %>% bind_rows(a)
+  rm(a)
+}
+
+emission = read_dta('data/DATA_20200711.dta') %>%
+  select(country, year, CO2exLULUCF_C, GHGexLULUCF_C, EPE_ex, EPE_im, GElectron_ex, GElectron_im, GEnergy_ex, GEnergy_im, GM_ex, GM_im, LCT_ex, LCT_im, GDP_current, FTD, EPS,FIE, country_EU, country_APEC, country_OPEC, FIT_Biomass) %>%
+  rename(ghg = GHGexLULUCF_C, co2 = CO2exLULUCF_C)
+```
+
+```{r}
+load('0823.rda')
+```
+
+## descriptive statistic
+
+-   plot the dist.
+
+```{r, warning=F}
+# % of missing ? hist
+tibble(a = c(12349, 66160), b = c('missing', 'complete')) %>%
+  ggplot() + aes(x='', y=a, fill = b) + geom_bar(stat = 'identity') +
+  coord_polar("y", start=0) +
+  labs(title = '綠能商品出口值 missing 比例')
+Export %>% group_by(Exporters) %>% 
+  summarize(na = sum(is.na(ex_value)), 
+            total = n()) %>%
+  arrange(desc(na)) %>% slice(1:30) %>% kable('html')
+set.seed(1213)
+Export %>% group_by(Exporters) %>% 
+  summarize(na = sum(is.na(ex_value)),
+            total = n()) %>% 
+  sample_n(5) %>% gather('type', 'missing values', 2:3) %>%
+  ggplot() + aes(x = Exporters, y = `missing values`, fill = type) +
+  geom_bar(stat = 'identity', position = 'stack') +
+  labs(title = '隨機5個國家的missing 比例', subtitle = '每國平均282筆資料，平均missing筆數為52筆')
+
+# pie chart
+Export %>% group_by(Exporters) %>% 
+  summarize(na = sum(is.na(ex_value))) %>% 
+  ggplot() + aes(na) + geom_histogram(binwidth = 10) +
+  labs(subtitle = '進出口值資料中有234國，missing超過平均數的比例有34%, 中位數的有49.5%')
+Export %>% group_by(Exporters) %>% 
+  summarize(na = sum(is.na(ex_value))) %>% arrange(desc(na)) %>%
+  mutate(group = case_when(na >= 200 ~ '> 200',
+                           na < 200 & na >= 150 ~ '150~200',
+                           na < 150 & na >= 100 ~ '100~150',
+                           na < 100 & na >= 50 ~ '50~100',
+                           T ~ '<50')) %>%
+  distinct(Exporters, .keep_all = T) %>% count(group) %>%
+  ggplot() + aes(x='', y=n, fill = group) + geom_bar(stat = 'identity') +
+  coord_polar("y", start=0) +
+  labs(title = '不同程度missing的比例', subtitle = '出口資料 按國家數')
+  
+# pie chart(不同data missing的比例)
+Tariff %>% gather('country', 'tariff', 2:166) %>%
+  group_by(country) %>% summarise(na = sum(is.na(tariff))) %>%
+  arrange(desc(na)) %>% slice(1:10) %>%
+  kable('html')
+Tariff %>% gather('country', 'tariff', 2:166) %>%
+  group_by(country) %>% summarise(na = sum(is.na(tariff))) %>%
+  mutate(na = case_when(na >= 15 ~ '>=15',
+                        na < 15 & na >= 10 ~ '10~15',
+                        na < 10 & na >= 5 ~ '5~10',
+                        T ~ '<5')) %>%
+  count(na) %>%
+  ggplot() + aes(x='', y=n, fill = na) + geom_bar(stat = 'identity') +
+  coord_polar("y", start=0) +
+  labs(title = '不同程度missing的比例', subtitle = '關稅資料 按國家數')
+
+# tariff (line plot 
+vec = Tariff %>% ungroup() %>% slice(17) %>% unlist(.)
+winner = numeric()
+winner_c = character()
+for(i in 2:166){
+  winner = c(winner, as.numeric(vec[i]))
+  winner_c = c(winner_c, names(vec[i]))
+  }
+tibble( country = winner_c, trf2016 = winner) %>%
+  arrange(desc(trf2016)) %>% slice(1:15) %>% kable('html')
+Tariff %>%
+  gather('country', "tariff", 2:166) %>%
+  filter(country %in% c('Comoros', 'Burkina Faso', 'Samoa', "Maldives", "Chad")) %>% 
+  mutate_at('year', as.numeric) %>% filter(year >= 2010) %>%
+# tibble( country = winner_c, trf2016 = winner) %>%
+#   arrange(desc(trf2016)) %>% slice(1:25) %>%sample_n(5)
+  ggplot() + aes(year, tariff, group=country, color=country) + 
+    geom_line(linetype = "dashed",size=1) +
+    geom_point(shape = 22, size = 3, fill = "white")+
+    labs(y = '關稅', title = '隨機抽5個國家的綠色商品關稅變動', subtitle = '關稅為該年所有綠色商品之平均關稅') +
+  theme_classic()
+rm(vec, winner, winner_c)
+
+set.seed(1213)
+emission %>% group_by(country) %>% 
+  summarize(na = sum(is.na(ghg)),
+            total = n()) %>%
+  sample_n(5) %>% gather('type', 'missing values', 2:3) %>%
+  ggplot() + aes(x = country, y = `missing values`, fill = type) +
+  geom_bar(stat = 'identity', position = 'dodge') +
+  labs(title = '隨機5個國家的排放資料missing 比例', subtitle = '每國平均169筆排放資料，平均missing筆數為2筆') +
+  coord_flip() + theme_classic()
+```
+
+# 針對不同數據做的missing處理
+
+Imputation, 0 padding, mean, logistic or dropping.
+
+-   export & import: 整體的missing 比例為`18.43%`,
+    去掉missing大於平均的sample（國家）後，missing的比例為`3%`
+
+-   `關稅`：drop掉
+    missing年份`>=10`的國家(總共2000-2020)，共20個國家被drop。
+    剩下的missing值用該國其他年的關稅平均起來做填補。
+
+-   做了進出口和關稅的missing data
+    描述性統計，至於`排放`的資料missing較少，故直接drop掉，此處也不多做呈現。另外，`最終的dataset是以關稅的年份國家為基礎做合併，進出口值和排放的資料勢必多做取捨，且missing要處理掉，以便模型係數能讓電腦算出來`
+
+-   年份：越早missing越多，此分析中影響較小。
+
+## 處理missing並且合併資料。
+
+-   `注意`：我用該國所有年的所有產品產值平均做填補na，接著再將該國同一年不同產品的出口值/
+    進口值做平均，拿來代表該國該年的進出口值。
+
+即使如此，少部分國家某幾年的進出口值會出現0，這邊忽略。
+
+-   最後將關稅、進出口資料庫共有的國家篩選出來，這個過程又刪除了21%的樣本QQ
+
+```{r, eval=F}
+Export %>% group_by(Exporters) %>% 
+  summarize(na = sum(is.na(ex_value)), 
+            total = n()) %>%
+  arrange(desc(na)) %>% mutate(perc = na/ total) %>% filter(perc >= mean(perc)) %>% pull(Exporters) -> country
+Export = Export %>% filter(!(Exporters %in% country)) %>%
+  group_by(Exporters) %>% 
+  mutate(mm = mean(ex_value, na.rm = T)) %>% ungroup() %>%
+  mutate(ex_value = ifelse(is.na(ex_value),
+                           mm, ex_value)) %>%  select(-mm)
+Export = Export %>% group_by(Exporters, year) %>%
+  summarise(ex_vl = mean(ex_value, na.rm=T)) %>% ungroup()
+
+Import = Import %>% filter(!(Importers %in% country)) %>%
+  group_by(Importers) %>% 
+  mutate(mm = mean(im_value, na.rm = T)) %>% ungroup() %>%
+  mutate(im_value = ifelse(is.na(im_value),
+                           mm, im_value)) %>%  select(-mm)
+Import = Import %>% group_by(Importers, year) %>%
+  summarise(im_vl = mean(im_value, na.rm=T)) %>% ungroup()
+
+Tariff = Tariff %>%
+  gather('country', 'tariff', 2:166) %>%
+  group_by(country) %>% mutate(mm = sum(is.na(tariff))) %>% ungroup() %>%
+  filter(!(mm >= 10)) %>% select(-mm) %>%
+  group_by(country) %>% mutate(mm = mean(tariff, na.rm = T)) %>% ungroup() %>%
+  mutate(tariff = ifelse(is.na(tariff),
+                         mm, tariff)) %>% select(-mm) 
+rm(country)
+
+data = Tariff %>% 
+  inner_join(Import, by = c("country" = "Importers", "year" = "year")) %>%
+  inner_join(Export, by = c("country" = "Exporters", "year" = "year")) %>% mutate_at('year', as.numeric) %>%
+  left_join(emission, by = c("country" = "country", "year" = "year"))
+# saveRDS(data, '0817.rds')
+```
+
+`有效樣本數: 2280`,
+樣本中有`120個國家`，每個國家都有19筆完整的進出口、關稅資料。
+
+
+# load data
+
+-   這邊剔除missing太多的變項
+
+`說明`：進出口值資料為綠色能源類，FTD是國際貿易依存度。
+
+-   這邊畫相關性散佈圖的原因是擔心變數之間有內生性，共線會導致係數偏誤。
+
+-   後續研究可考慮篩選變數的模型（i.e. `stepwise` or
+    `lasso regression`）
+
+```{r, warning=F}
+rm(emission, Export, Import, Tariff)
+# data = readRDS('0817.rds')
+# data %>% glimpse()
+for(i in 6:25){
+  cat(names(data[i]), 'data is missing about', sum(is.na(data[,i])), 'entries among 2280 obs.', "\n")
+}
+
+data = data %>% select(1:5, co2, ghg, GDP_current, FTD, country_EU, country_APEC, country_OPEC) %>%
+  mutate(netGE = ex_vl - im_vl)
+data %>% glimpse()
+
+# plot net ge
+data %>% 
+  filter(year == '2017') %>%
+  filter((country_EU + country_APEC + country_OPEC) == 1) %>% 
+  mutate(union = case_when(
+    country_EU == 1 ~ 'EU',
+    country_APEC == 1 ~ 'APEC',
+    country_OPEC == 1 ~ 'OPEC',
+  )) %>% 
+  select(netGE, country, union) %>%
+  ggplot() + aes(country, netGE, fill = union) +
+  geom_bar(stat = 'identity') + 
+  coord_flip() + theme_classic() +
+  labs(title = '綠能商品淨出口', substitle = '(千美元)')
+
+data %>%
+  select(im_vl, ex_vl) %>% ggpairs() + labs(title = '進口和出口的相關性')
+data %>%
+  select(ghg, co2) %>% ggpairs() + labs(title = 'co2 和ghg的相關性')
+data %>%
+  select(im_vl, ghg, tariff) %>% ggpairs()
+```
+
+### add varibles
+
+APEC.., GDP, net export & import(t-1)
+
+# appendix : 上禮拜報告的修正
+
+感謝`張軒瑜`學姐指導&建議
+
+## outliers
+
+### 拿掉兩個較大的outlier
+
+![原本溫室氣體和進口值的關係(按國家)
+土色和粉色分別是中/美](data/screen0818.jpg)
+
+可以看到美國(`粉`)是負相關，可能`發展程度`不同的國家在關稅(`誤植為ghg`)與進出口值的表現也不盡相同,
+所以試著拿掉看看。
+
+-   然而，我發現y軸不是關稅而是ghg， 所以重做一張看看
+
+```{r}
+data %>% 
+  filter(!(country %in% c('China', 'United States of America')))%>%
+  ggplot()+
+  geom_point(aes(x=im_vl,y=I(ghg*1000), color = country))+
+  theme(legend.position = "none") +
+  labs(title = '溫室氣體和進口值的散佈圖（拿掉中美）', subtitle = '請忽略這張圖QQ')
+
+data %>% 
+  ggplot()+
+  geom_point(aes(x=im_vl,y=I(tariff*1000), color = country))+
+  theme(legend.position = "none") +
+  labs(title = '關稅和進口值的散佈圖', subtitle = '(更正版本)')
+```
+
+### 按照發展程度分類
+
+```{r}
+data %>%
+  mutate(union = case_when(
+    country_EU == 1 ~ 'EU',
+    country_APEC == 1 ~ 'APEC',
+    country_OPEC == 1 ~ 'OPEC',
+    T ~ 'others'
+  )) %>%
+  ggplot()+
+  geom_point(aes(x=im_vl,y=I(tariff*1000), color = union))+
+  # theme(legend.position = "none") +
+  labs(title = '關稅和進口值的散佈圖', subtitle = '按不同聯盟')
+```
+
+可以看到`AEPC`國家的分布顯著離群。
+
+## implement econometric models
+
+-   這邊把原資料`關稅*100倍`，單位會從千美元變成十美元，GDP除以1000萬，其他變項不變。
+
+-   變項只有一個的時候，random
+    effect和fix的結果相同，這邊修正，加入多變量看看。
+
+### simple model
+
+拿來和reduced model 的adj- R square 作比較
+```{r}
+data = data %>% mutate(tariff = 100*tariff)
+data <- pdata.frame(data,c("country","year"))
+
+md = im_vl ~ tariff
+pool1 <- plm(md, data=data, model='pooling')
+re1<-plm(md, data=data, model='random')
+fe1<-plm(md, data=data, model='within', effect='individual')
+fe2<-plm(md, data=data, model='within', effect='twoways')
+
+export_summs(pool1,re1,fe1,fe2,
+          model.names  = c("Pooled OLS","RE","FE-individual","FE-two-ways"))
+```
+
+
+### reduced model
+
+表現還不錯，新增變數後的進步幅度不大。（內生性的問題透過淨出口、co2/ghg擇一的方式解決。）
+```{r}
+# data = data %>% mutate(tariff = 100*tariff)
+# data <- pdata.frame(data,c("country","year"))
+
+md = im_vl ~ tariff + co2 
+pool1 <- plm(md, data=data, model='pooling')
+re1<-plm(md, data=data, model='random')
+fe1<-plm(md, data=data, model='within', effect='individual')
+fe2<-plm(md, data=data, model='within', effect='twoways')
+
+export_summs(pool1,re1,fe1,fe2,
+          model.names  = c("Pooled OLS","RE","FE-individual","FE-two-ways"))
+```
+
+### full model
+
+```{r}
+md = im_vl ~ tariff + co2 + country_APEC + country_OPEC + country_EU
+pool1 <- plm(md, data=data, model='pooling')
+# summary(pool1)
+re1<-plm(md, data=data, model='random')
+# summary(re1)
+fe1<-plm(md, data=data, model='within', effect='individual')
+# summary(fe1)
+fe2<-plm(md, data=data, model='within', effect='twoways')
+# summary(fe2)
+
+# stargazer(pool1,re1,fe1,fe2,type='text',
+#           column.labels = c("Pooled OLS","RE","FE-individual","FE-two-ways"))
+
+export_summs(pool1,re1,fe1,fe2, model.names = c("Pooled OLS","RE","FE-individual","FE-two-ways"))
+```
+
+從前面section的相關性散布圖可以得知，進口值和關稅、溫室氣體排放量的相關係數都很高，懷疑有因果關係，故將進口值作為dependent variable來建立panel data的回歸模型。
+
+進口值和出口值有高度共線性，溫室氣體和co2排放也是，所以這邊變數沒有放co2, export。
+
+另外， 若是co2
+    和ghg一起放入模型，R\^2雖然增加，但co2
+    ghg的係數方向會相反，產生內生性的問題。
+
+-   可以看到，平均而言每增加1頓/m^3 `二氧化碳排放`，該國這一年的綠能進口值會增加400-500千美元；平均而言，`APEC國家`對進口值的個體效應會是負的影響。此外， `tariff`也是影響進口值顯著的變項。
+
+- 在固定效果模型中，關稅的影響正負號完全相反，可能的原因是：加入了時間固定效應後，關稅的影響從負變正，然而時間的影響可能取代了關稅的影響，`我們只要看國家的固定效應，時間的固定效應不需納入考量`。
+
+因為隨機效應模型有捕捉到國家的獨特性的影響，雖然沒有考量到時間的效果，但解釋能力沒有下降太多，故時間的固定效果可有可無（**然而那個關稅正的影響還是顯著的，可以想想為什麼**）。
+
+- R^2 高達60-70%，然而pool的模型的解釋能力更好，代表做panel data不一定適合這個資料，每個國家的固定效應和時間效應不明顯。`在係數的解釋上，panel data模型較能描述該經濟體的狀況，使得變數解釋更加容易。`
+
+### super full model(+ GDP, FTD)
+
+- 加入了更多變數後，模型的解釋能力明顯變好。仍然可觀察到兩個現象：
+
+1. pool 和 panel data的model解釋能力一樣好，係數類似，可能原因是這邊沒有分產品別，呈現出來的效果是平均的。
+
+2. 關稅在加入時間的固定效果後，係數**不再**是正的，該模型符合我們的預期！表現也`最好`。
+```{r}
+pd = data %>%
+  drop_na() %>%
+  mutate(GDP_current = GDP_current/10e7)
+
+md = im_vl ~ tariff + co2 + country_APEC + country_OPEC + country_EU + FTD + GDP_current
+pool1 <- plm(md, data=pd, model='pooling')
+re1<-plm(md, data=pd, model='random')
+fe1<-plm(md, data=pd, model='within', effect='individual')
+fe2<-plm(md, data=pd, model='within', effect='twoways')
+
+export_summs(pool1,re1,fe1,fe2,
+          model.names  = c("Pooled OLS","FE- time","FE-individual","FE-two-ways"))
+rm(pd)
+```
+
+### Dynamic model(AR1), pooled.
+
+- 關稅的影響在此分析模式下不大，再次證明了加入時間效應的影響不適合分析。可能原因為資料的時間跨度不大，不同時間的同質性高。
+```{r, warning = F}
+imp_t = numeric()
+for(i in 1:2280){
+  if(i %% 19 == 1){imp_t = c(imp_t, NaN)}
+  else{imp_t = c(imp_t, data$im_vl[i-1])}
+}
+imp_t = unname(imp_t)
+data %>%
+  mutate(imp_t = imp_t) %>% select(im_vl, imp_t) %>%
+  ggpairs() +
+  labs(title = '今年和去年的進口值關聯圖')
+
+coeftest(lm(im_vl ~ imp_t  , data = data), vcov. = vcovHC, type = "HC1")
+coeftest(lm(im_vl ~ imp_t + tariff+ co2 + country_APEC + country_OPEC + country_EU, data = data), vcov. = vcovHC, type = "HC1")
+coeftest(lm(im_vl ~ imp_t + tariff + co2 , data = data), vcov. = vcovHC, type = "HC1")
+```
+
+### spatial weights matrix
+
+無各國之間的相關性矩陣，無法建模。
+
+## husmen test
+
+-   模型選擇, 固定效果 or 隨機效果模型？
+
+The null hypothesis is that there is no correlation between the unique
+errors and the regressors in the model.
+
+**應該使用固定效果模型！**
+
+```{r}
+phtest(fe1,re1)
+```
+
+# Summary
+
+- 進出口之間， ghg/co2會有高度相關，故不會同時放入模型作為features，避免係數誤判。
+
+-   對綠能商品進口值顯著的變項有淨出口、二氧化碳排放量、FTD、GDP以及區域貿易協議組織（APEC, EU）。
+
+-   較好的模型：`super full model`。另外，AR(1)的效果不如預期。
+
+加入FTD和GDP的資料後，模型的預測效果大幅上升。
+
+- APEC國家降低關稅確實對進口有顯著的影響
+
+- pool 和 panel data的model解釋能力一樣好，係數類似，可能原因是這邊沒有分產品別。
+
+- 關稅可能會被時間的固定效應所干擾，而時間固定效應的來源，強烈懷疑是**APEC國家15年前後的關稅政策。**
+
+整體來説，降低關稅、提高碳排放量、提高貿易依存度，平均而言有助於綠能商品的進口。
+
+- APEC, EU countries have significant effect on importing more green energy product.
+
+- 然而，**降低關稅對提高進口值的影響非常顯著**。我們再來看看後續的個別產品分析。
+
+在super full model 中， panel data的模型表現追上OLS的預測能力，且前者在係數解釋上更直觀、符合研究預期。
+
+# reference
+
+author： Duke Liu **b07801013@g.ntu.edu.tw**
+
+<https://www.econometrics-with-r.org/14-3-autoregressions.html>
+
+
